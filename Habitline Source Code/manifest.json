@@ -1,0 +1,32 @@
+{
+  "name": "Habitline Health Tracker",
+  "short_name": "Habitline",
+  "id": "/",
+  "description": "Habits, lifting, offline food tracking, journal, goals, calendar and kickboxing.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "any",
+  "categories": ["health", "fitness", "lifestyle", "productivity"],
+  "background_color": "#f3f4f6",
+  "theme_color": "#18202a",
+  "shortcuts": [
+    {"name":"Log workout","short_name":"Workout","url":"/?view=lifting"},
+    {"name":"Add food","short_name":"Food","url":"/?view=food"},
+    {"name":"Write journal","short_name":"Journal","url":"/?view=journal"},
+    {"name":"Open calendar","short_name":"Calendar","url":"/?view=planner"}
+  ],
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

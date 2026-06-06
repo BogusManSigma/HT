@@ -1,0 +1,26 @@
+INSTALL HABITLINE ON IPHONE
+===========================
+
+1. On the PC, double-click "Launch Habitline.bat".
+2. In Habitline, select "Phone sync".
+3. Connect the iPhone and PC to the same private Wi-Fi.
+4. Copy the private phone link and open it in Safari on the iPhone.
+5. In Safari, tap Share.
+6. Tap "Add to Home Screen", then tap "Add".
+
+Habitline will appear on the iPhone Home Screen and open like an app.
+Anything logged on the phone or PC uses the same saved data.
+
+IMPORTANT
+---------
+
+Keep the PC on and Habitline running while using the iPhone app. This version
+uses the PC as its private data server and does not upload your health data to
+a cloud account.
+
+If the iPhone cannot open the link, double-click "Enable Phone Access.bat" on
+the PC once and approve the Windows prompt.
+
+A signed App Store/IPA build requires macOS, Xcode and Apple code signing.
+The Home Screen version is the installable iPhone copy available directly
+from this Windows PC.
