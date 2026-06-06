@@ -1,1117 +1,3133 @@
-"""GitHub-ready Streamlit entry point for Habitline."""
-
 from __future__ import annotations
 
-import html
+import argparse
 import json
+import os
+import re
+import socket
+import threading
+import time
 import uuid
-from datetime import date, datetime, timedelta
+import webbrowser
+from datetime import date, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
-import pandas as pd
-import streamlit as st
-import streamlit.components.v1 as components
 
-from habitline_core import (
-    DEFAULT_COLORS,
-    DEFAULT_NUTRITION_GOALS,
-    DEFAULT_XP_REWARDS,
-    NUTRIENT_KEYS,
-    OPEN_FOOD_FACTS_BASE,
-    OPEN_FOOD_FACTS_FIELDS,
-    HabitStore,
-    fetch_open_food_facts,
-    fetch_usda_foods,
-    habit_stats,
-    kickboxing_grade_xp,
-    open_food_facts_product,
-    scaled_nutrients,
-    search_offline_foods,
-    validate_body_entry,
-    validate_food,
-    validate_food_entry,
-    validate_goal,
-    validate_journal_entry,
-    validate_kickboxing_session,
-    validate_meal,
-    validate_nutrition_goals,
-    validate_planner_event,
-    validate_recovery_entry,
-    validate_shopping_item,
-    validate_weekly_schedule_item,
-    validate_workout,
-    validate_workout_day,
+APP_NAME = "Habitline"
+APP_VERSION = "4.6"
+DEFAULT_PORT = 8779
+DEFAULT_COLORS = ["#5B6CFF", "#19A974", "#F59E45", "#D65DB1", "#3E9DD6", "#7357C8"]
+OPEN_FOOD_FACTS_BASE = "https://world.openfoodfacts.org"
+USDA_FDC_BASE = "https://api.nal.usda.gov/fdc/v1"
+OPEN_FOOD_FACTS_FIELDS = (
+    "code,product_name,product_name_en,brands,quantity,"
+    "image_front_small_url,image_front_url,nutriments"
 )
-
-
-ROOT = Path(__file__).resolve().parent
-DATA_FILE = ROOT / "data" / "habits.json"
-MUSCLES = ["Chest", "Back", "Shoulders", "Biceps", "Triceps", "Forearms", "Core", "Other"]
-WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-LEVELS = [
-    ("F", 0), ("E", 250), ("D", 600), ("C", 1100), ("B", 1800),
-    ("A", 2700), ("S", 3800), ("SS", 5100), ("SSS", 6600), ("G", 8500),
+NUTRIENT_KEYS = (
+    "calories",
+    "alcohol",
+    "caffeine",
+    "oxalate",
+    "phytate",
+    "water",
+    "protein",
+    "fat",
+    "carbs",
+    "net_carbs",
+    "fibre",
+    "insoluble_fibre",
+    "soluble_fibre",
+    "starch",
+    "sugars",
+    "added_sugars",
+    "monounsaturated_fat",
+    "polyunsaturated_fat",
+    "omega_3",
+    "ala",
+    "dha",
+    "epa",
+    "omega_6",
+    "arachidonic_acid",
+    "linoleic_acid",
+    "saturated_fat",
+    "trans_fat",
+    "cholesterol",
+    "cystine",
+    "histidine",
+    "isoleucine",
+    "leucine",
+    "lysine",
+    "methionine",
+    "phenylalanine",
+    "threonine",
+    "tryptophan",
+    "tyrosine",
+    "valine",
+    "vitamin_b1",
+    "vitamin_b2",
+    "vitamin_b3",
+    "vitamin_b5",
+    "vitamin_b6",
+    "vitamin_b12",
+    "folate",
+    "vitamin_a",
+    "vitamin_c",
+    "vitamin_d",
+    "vitamin_e",
+    "vitamin_k",
+    "calcium",
+    "copper",
+    "iron",
+    "magnesium",
+    "manganese",
+    "phosphorus",
+    "potassium",
+    "selenium",
+    "sodium",
+    "zinc",
+)
+DEFAULT_WEEKLY_SCHEDULE = [
+    {"id": "schedule_mon_run", "weekday": 0, "title": "C25K Run", "start": "06:20", "end": "07:05", "type": "workout", "color": "#12A35B"},
+    {"id": "schedule_wed_run", "weekday": 2, "title": "C25K Run", "start": "06:20", "end": "07:05", "type": "workout", "color": "#12A35B"},
+    {"id": "schedule_fri_run", "weekday": 4, "title": "C25K Run", "start": "06:20", "end": "07:05", "type": "workout", "color": "#12A35B"},
+    *[
+        {"id": f"schedule_work_{day}", "weekday": day, "title": "Work", "start": "07:30", "end": "17:00", "type": "note", "color": "#5B82A9"}
+        for day in range(5)
+    ],
+    {"id": "schedule_mon_kickboxing", "weekday": 0, "title": "Kickboxing", "start": "18:00", "end": "20:00", "type": "workout", "color": "#D91515"},
+    {"id": "schedule_wed_kickboxing", "weekday": 2, "title": "Kickboxing", "start": "18:00", "end": "20:00", "type": "workout", "color": "#D91515"},
+    {"id": "schedule_thu_kickboxing", "weekday": 3, "title": "Kickboxing", "start": "18:00", "end": "20:00", "type": "workout", "color": "#D91515"},
+    {"id": "schedule_mon_push", "weekday": 0, "title": "Gym (Push)", "start": "20:30", "end": "21:30", "type": "workout", "color": "#8F18B5"},
+    {"id": "schedule_tue_pull", "weekday": 1, "title": "Gym (Pull)", "start": "20:30", "end": "21:30", "type": "workout", "color": "#8F18B5"},
+    {"id": "schedule_thu_push", "weekday": 3, "title": "Gym (Push)", "start": "20:30", "end": "21:30", "type": "workout", "color": "#8F18B5"},
+    {"id": "schedule_fri_pull", "weekday": 4, "title": "Gym (Pull)", "start": "20:30", "end": "21:30", "type": "workout", "color": "#8F18B5"},
+    {"id": "schedule_sat_rest", "weekday": 5, "title": "Rest day", "start": "", "end": "", "type": "note", "color": "#7A8491"},
+    {"id": "schedule_sun_rest", "weekday": 6, "title": "Rest day", "start": "", "end": "", "type": "note", "color": "#7A8491"},
 ]
-NUTRIENT_META = {
-    "calories": ("Energy", "kcal", "General"),
-    "water": ("Water", "g", "General"),
-    "protein": ("Protein", "g", "Protein & Amino Acids"),
-    "fat": ("Fat", "g", "Lipids"),
-    "carbs": ("Carbs", "g", "Carbohydrates"),
-    "net_carbs": ("Net carbs", "g", "Carbohydrates"),
-    "fibre": ("Fibre", "g", "Carbohydrates"),
-    "sugars": ("Sugars", "g", "Carbohydrates"),
-    "added_sugars": ("Added sugars", "g", "Carbohydrates"),
-    "saturated_fat": ("Saturated fat", "g", "Lipids"),
-    "omega_3": ("Omega-3", "g", "Lipids"),
-    "omega_6": ("Omega-6", "g", "Lipids"),
-    "cholesterol": ("Cholesterol", "mg", "Lipids"),
-    "vitamin_b1": ("B1 (Thiamine)", "mg", "Vitamins"),
-    "vitamin_b2": ("B2 (Riboflavin)", "mg", "Vitamins"),
-    "vitamin_b3": ("B3 (Niacin)", "mg", "Vitamins"),
-    "vitamin_b5": ("B5 (Pantothenic acid)", "mg", "Vitamins"),
-    "vitamin_b6": ("B6 (Pyridoxine)", "mg", "Vitamins"),
-    "vitamin_b12": ("B12 (Cobalamin)", "mcg", "Vitamins"),
-    "folate": ("Folate", "mcg", "Vitamins"),
-    "vitamin_a": ("Vitamin A", "mcg", "Vitamins"),
-    "vitamin_c": ("Vitamin C", "mg", "Vitamins"),
-    "vitamin_d": ("Vitamin D", "mcg", "Vitamins"),
-    "vitamin_e": ("Vitamin E", "mg", "Vitamins"),
-    "vitamin_k": ("Vitamin K", "mcg", "Vitamins"),
-    "calcium": ("Calcium", "mg", "Minerals"),
-    "copper": ("Copper", "mg", "Minerals"),
-    "iron": ("Iron", "mg", "Minerals"),
-    "magnesium": ("Magnesium", "mg", "Minerals"),
-    "manganese": ("Manganese", "mg", "Minerals"),
-    "phosphorus": ("Phosphorus", "mg", "Minerals"),
-    "potassium": ("Potassium", "mg", "Minerals"),
-    "selenium": ("Selenium", "mcg", "Minerals"),
-    "sodium": ("Sodium", "mg", "Minerals"),
-    "zinc": ("Zinc", "mg", "Minerals"),
+
+DEFAULT_XP_REWARDS = {
+    "habit": 10,
+    "workout_first": 10,
+    "workout_improvement": 20,
+    "workout_standard": 5,
+    "journal": 15,
+    "goal": 100,
 }
-LIMIT_NUTRIENTS = {"added_sugars", "saturated_fat", "trans_fat", "cholesterol", "sodium"}
-KICKBOXING = [
-    ("9th Kyu Red/White", "Stance, movement and basic strikes", [
-        "Jab > Cross > Lead Low Kick",
-        "Jab > Cross > Lead Hook > Rear Low Kick > Check",
-        "Jab > Lead Front Kick > Rear Front Kick",
-    ]),
-    ("9th Kyu Red", "Basic striking, defence and pivoting", [
-        "Jab > Cross > Lead Low Kick",
-        "Jab > Cross > Lead Hook > Rear Low Kick",
-        "Jab > Rear Hook > Lead Uppercut > Rear Knee",
-    ]),
-    ("8th Kyu Yellow/White", "Add round kicks, parries and fluid movement", [
-        "Jab > Rear Uppercut > Lead Round-Kick",
-        "Jab > Lead Front Kick > Rear Front Kick",
-        "Jab > Cross > Lead Hook > Rear Low Kick",
-    ]),
-    ("8th Kyu Yellow", "Head/body combinations, slipping and defence", [
-        "Jab > Body Cross > Lead Hook > Rear Low Kick",
-        "Jab > Cross > Lead Body Round Kick > Cross > Lead Hook > Rear Round-Kick",
-    ]),
-    ("7th Kyu Orange/White", "Add rolls and head/body round kicks", [
-        "Jab > Cross > Roll > Cross > Lead Hook",
-        "Switch Round-Kick > Cross > Lead Body Hook",
-    ]),
-    ("7th Kyu Orange", "Add switch kicks and pull-back defence", [
-        "Switch Round-Kick > Cross > Lead Body Hook",
-        "Body Jab > Rear Overhand > Lead Body Round-Kick",
-    ]),
-    ("6th Kyu Green/White", "Add rear overhand, checks and stronger defence", [
-        "Body Jab > Rear Overhand > Lead Body Round-Kick",
-        "Cross > Switch-Knee > Rear Hook > Shovel Hook",
-    ]),
-    ("6th Kyu Green", "Add shovel hook, switch knee and combinations", [
-        "Cross > Switch-Knee > Rear Hook > Shovel Hook",
-        "Lead Parry > Cross > Lead Hook > Spinning Back-fist",
-    ]),
-    ("5th Kyu Blue/White", "Power, accuracy and defensive exits", [
-        "Lead Parry > Cross > Lead Hook > Spinning Back-fist",
-        "Jab > Cross > Roll > Cross > Lead Hook",
-    ]),
-    ("5th Kyu Blue", "Add feints, cross-checks and step-off exits", [
-        "Jab > Cross > Lead Low Kick > Cross-check",
-        "Cross > Switch-Knee > Rear Hook > Shovel Hook > Frame and Exit",
-    ]),
-    ("4th Kyu Purple/White", "Add crescent kicks, axe kicks and long guard", [
-        "Axe-Kick > Jab > Cross > Crescent Kick > Rear Axe Kick > Step-Back",
-        "Lead Parry > Cross > Lead Hook > Spinning Back-fist > Slip and Exit",
-    ]),
-    ("4th Kyu Purple", "Advanced movement, jumping knee and bag-work", [
-        "Check Hook > Jumping Knee > Long Frame and Exit",
-        "Axe-Kick > Jab > Cross > Crescent Kick > Rear Axe Kick > Step-Back",
-    ]),
-]
 
 
-st.set_page_config(
-    page_title="Habitline Streamlit",
-    page_icon=str(ROOT / "icon-192.png"),
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    """
-    <style>
-    .stApp { background: #f5f7fb; color: #172033; }
-    [data-testid="stSidebar"] { background: #121722; }
-    [data-testid="stSidebar"] * { color: #f6f7fb; }
-    .block-container { max-width: 1500px; padding-top: 1.4rem; }
-    div[data-testid="stMetric"] {
-      background: white; border: 1px solid #e2e7f0; border-radius: 18px;
-      padding: 18px; box-shadow: 0 8px 24px rgba(24,32,52,.05);
-    }
-    .card {
-      background: white; border: 1px solid #e2e7f0; border-radius: 18px;
-      padding: 18px; margin-bottom: 14px;
-    }
-    .rank { display:inline-block; padding:5px 12px; border-radius:999px;
-      background:#5b6cff; color:white; font-weight:800; }
-    .muted { color:#718096; font-size:.9rem; }
-    .good { color:#0f8b61; font-weight:700; }
-    .warn { color:#c06b12; font-weight:700; }
-    .bad { color:#ce4257; font-weight:700; }
-    .nutrient-row { display:grid; grid-template-columns:190px 100px 1fr 60px;
-      gap:12px; align-items:center; padding:6px 0; font-size:.9rem; }
-    .bar { background:#edf0f6; height:9px; border-radius:20px; overflow:hidden; }
-    .bar > span { display:block; height:100%; border-radius:20px; background:#5b6cff; }
-    @media (prefers-color-scheme: dark) {
-      .stApp { background:#0f131a; color:#f2f4f8; }
-      div[data-testid="stMetric"], .card { background:#181e28; border-color:#2a3442; }
-      .muted { color:#a8b3c5; } .bar { background:#2a3442; }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+def kickboxing_grade_xp(grade: str) -> int:
+    match = re.search(r"\b(9|8|7|6|5|4)(?:th|st|nd|rd)?\s+kyu\b", grade.lower())
+    if not match:
+        return 1
+    return {9: 1, 8: 2, 7: 3, 6: 3, 5: 4, 4: 5}[int(match.group(1))]
 
 
-@st.cache_resource
-def get_store() -> HabitStore:
-    return HabitStore(DATA_FILE)
-
-
-store = get_store()
-
-
-def reload_store() -> None:
-    store.load()
-
-
-def rerun(message: str | None = None) -> None:
-    if message:
-        st.session_state["flash"] = message
-    st.rerun()
-
-
-def show_flash() -> None:
-    message = st.session_state.pop("flash", None)
-    if message:
-        st.toast(message)
-
-
-def day_key(value: date | str) -> str:
-    return value if isinstance(value, str) else value.isoformat()
-
-
-def level_stats() -> dict:
-    xp = max(0, int(store.settings.get("xp_balance", 0)))
-    index = max(i for i, (_, minimum) in enumerate(LEVELS) if xp >= minimum)
-    name, minimum = LEVELS[index]
-    if index == len(LEVELS) - 1:
-        return {"xp": xp, "rank": name, "progress": 100, "next": None, "remaining": 0}
-    next_name, next_minimum = LEVELS[index + 1]
-    progress = (xp - minimum) / (next_minimum - minimum) * 100
+def default_settings() -> dict:
     return {
-        "xp": xp, "rank": name, "progress": min(100, max(0, progress)),
-        "next": next_name, "remaining": next_minimum - xp,
+        "profile": {
+            "age": 0,
+            "display_name": "",
+            "body_weight": 0,
+            "weight_unit": "kg",
+            "height_cm": 0,
+            "sex": "male",
+            "activity_level": "active",
+            "goal_type": "recomposition",
+            "training_experience": "beginner",
+            "auto_nutrition": True,
+        },
+        "usda_api_key": os.environ.get("FDC_API_KEY", "DEMO_KEY"),
+        "sync_token": uuid.uuid4().hex[:16],
+        "xp_rewards": dict(DEFAULT_XP_REWARDS),
+        "xp_offset": 0,
+        "xp_balance": 0,
+        "xp_awards": {},
+    }
+DEFAULT_NUTRITION_GOALS = {
+    "calories": 2000,
+    "alcohol": 0,
+    "caffeine": 0,
+    "oxalate": 0,
+    "phytate": 0,
+    "water": 3700,
+    "protein": 50,
+    "fat": 78,
+    "carbs": 275,
+    "net_carbs": 275,
+    "fibre": 28,
+    "insoluble_fibre": 0,
+    "soluble_fibre": 0,
+    "starch": 0,
+    "sugars": 0,
+    "added_sugars": 50,
+    "monounsaturated_fat": 0,
+    "polyunsaturated_fat": 0,
+    "omega_3": 1.6,
+    "ala": 1.6,
+    "dha": 0.25,
+    "epa": 0.25,
+    "omega_6": 17,
+    "arachidonic_acid": 0,
+    "linoleic_acid": 17,
+    "saturated_fat": 20,
+    "trans_fat": 0,
+    "cholesterol": 300,
+    "cystine": 0.3,
+    "histidine": 0.7,
+    "isoleucine": 1.4,
+    "leucine": 2.7,
+    "lysine": 2.1,
+    "methionine": 0.7,
+    "phenylalanine": 1.75,
+    "threonine": 1.05,
+    "tryptophan": 0.28,
+    "tyrosine": 1.75,
+    "valine": 1.82,
+    "vitamin_b1": 1.2,
+    "vitamin_b2": 1.3,
+    "vitamin_b3": 16,
+    "vitamin_b5": 5,
+    "vitamin_b6": 1.7,
+    "vitamin_b12": 2.4,
+    "folate": 400,
+    "vitamin_a": 900,
+    "vitamin_c": 90,
+    "vitamin_d": 20,
+    "vitamin_e": 15,
+    "vitamin_k": 120,
+    "calcium": 1300,
+    "copper": 0.9,
+    "iron": 18,
+    "magnesium": 420,
+    "manganese": 2.3,
+    "phosphorus": 1250,
+    "potassium": 4700,
+    "selenium": 55,
+    "sodium": 2300,
+    "zinc": 11,
+}
+DEFAULT_FOODS = [
+    {
+        "id": "food_beef_steak_cooked",
+        "name": "Beef steak, cooked",
+        "serving_name": "100 g",
+        "nutrients": {
+            "calories": 271,
+            "water": 55.0,
+            "protein": 26.0,
+            "fat": 18.0,
+            "carbs": 0,
+            "net_carbs": 0,
+            "fibre": 0,
+            "monounsaturated_fat": 7.2,
+            "polyunsaturated_fat": 0.7,
+            "omega_3": 0.08,
+            "omega_6": 0.55,
+            "saturated_fat": 7.2,
+            "trans_fat": 0.7,
+            "cholesterol": 89,
+            "cystine": 0.34,
+            "histidine": 0.96,
+            "isoleucine": 1.20,
+            "leucine": 2.02,
+            "lysine": 2.14,
+            "methionine": 0.66,
+            "phenylalanine": 1.00,
+            "threonine": 1.03,
+            "tryptophan": 0.24,
+            "tyrosine": 0.82,
+            "valine": 1.28,
+            "vitamin_b1": 0.07,
+            "vitamin_b2": 0.20,
+            "vitamin_b3": 4.8,
+            "vitamin_b5": 0.6,
+            "vitamin_b6": 0.4,
+            "vitamin_a": 0,
+            "calcium": 12,
+            "copper": 0.08,
+            "iron": 2.5,
+            "magnesium": 21,
+            "manganese": 0.01,
+            "phosphorus": 200,
+            "potassium": 315,
+            "selenium": 25,
+            "sodium": 55,
+            "zinc": 5.5,
+            "vitamin_c": 0,
+            "vitamin_d": 0.1,
+            "vitamin_e": 0.3,
+            "vitamin_k": 1.5,
+            "vitamin_b12": 2.5,
+            "folate": 9,
+        },
+    },
+    {
+        "id": "food_chicken_breast_cooked",
+        "name": "Chicken breast, cooked",
+        "serving_name": "100 g",
+        "nutrients": {
+            "calories": 165,
+            "protein": 31.0,
+            "fat": 3.6,
+            "carbs": 0,
+            "fibre": 0,
+            "calcium": 15,
+            "iron": 1.0,
+            "magnesium": 29,
+            "phosphorus": 220,
+            "potassium": 256,
+            "sodium": 74,
+            "zinc": 1.0,
+            "vitamin_c": 0,
+            "vitamin_d": 0.1,
+            "vitamin_b12": 0.3,
+            "folate": 4,
+        },
+    },
+    {
+        "id": "food_salmon_cooked",
+        "name": "Salmon, cooked",
+        "serving_name": "100 g",
+        "nutrients": {
+            "calories": 206,
+            "protein": 22.0,
+            "fat": 12.0,
+            "carbs": 0,
+            "fibre": 0,
+            "calcium": 12,
+            "iron": 0.3,
+            "magnesium": 30,
+            "phosphorus": 252,
+            "potassium": 384,
+            "sodium": 61,
+            "zinc": 0.6,
+            "vitamin_c": 0,
+            "vitamin_d": 13.0,
+            "vitamin_b12": 3.2,
+            "folate": 26,
+        },
+    },
+    {
+        "id": "food_white_rice_cooked",
+        "name": "White rice, cooked",
+        "serving_name": "100 g",
+        "nutrients": {
+            "calories": 130,
+            "protein": 2.7,
+            "fat": 0.3,
+            "carbs": 28.2,
+            "fibre": 0.4,
+            "calcium": 10,
+            "iron": 0.2,
+            "magnesium": 12,
+            "phosphorus": 43,
+            "potassium": 35,
+            "sodium": 1,
+            "zinc": 0.5,
+            "vitamin_c": 0,
+            "vitamin_d": 0,
+            "vitamin_b12": 0,
+            "folate": 3,
+        },
+    },
+    {
+        "id": "food_broccoli_cooked",
+        "name": "Broccoli, cooked",
+        "serving_name": "100 g",
+        "nutrients": {
+            "calories": 35,
+            "protein": 2.4,
+            "fat": 0.4,
+            "carbs": 7.2,
+            "fibre": 3.3,
+            "calcium": 40,
+            "iron": 0.7,
+            "magnesium": 21,
+            "phosphorus": 67,
+            "potassium": 293,
+            "sodium": 41,
+            "zinc": 0.5,
+            "vitamin_c": 65,
+            "vitamin_d": 0,
+            "vitamin_b12": 0,
+            "folate": 108,
+        },
+    },
+    {
+        "id": "food_egg_whole_cooked",
+        "name": "Whole egg, cooked",
+        "serving_name": "100 g",
+        "nutrients": {
+            "calories": 155,
+            "protein": 12.6,
+            "fat": 10.6,
+            "carbs": 1.1,
+            "fibre": 0,
+            "calcium": 50,
+            "iron": 1.2,
+            "magnesium": 10,
+            "phosphorus": 172,
+            "potassium": 126,
+            "sodium": 124,
+            "zinc": 1.1,
+            "vitamin_c": 0,
+            "vitamin_d": 2.2,
+            "vitamin_b12": 1.1,
+            "folate": 44,
+        },
+    },
+    {
+        "id": "food_banana",
+        "name": "Banana",
+        "serving_name": "100 g",
+        "nutrients": {
+            "calories": 89,
+            "protein": 1.1,
+            "fat": 0.3,
+            "carbs": 22.8,
+            "fibre": 2.6,
+            "calcium": 5,
+            "iron": 0.3,
+            "magnesium": 27,
+            "phosphorus": 22,
+            "potassium": 358,
+            "sodium": 1,
+            "zinc": 0.2,
+            "vitamin_c": 8.7,
+            "vitamin_d": 0,
+            "vitamin_b12": 0,
+            "folate": 20,
+        },
+    },
+]
+
+# A compact common-food catalogue is bundled so everyday logging and search do
+# not depend on the USDA API. Values are per 100 g and use common USDA-style
+# reference values; online search remains available for branded products.
+DEFAULT_FOODS.extend(
+    [
+        {
+            "id": "food_oats_dry",
+            "name": "Oats, rolled, dry",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 379, "protein": 13.2, "fat": 6.5, "carbs": 67.7,
+                "fibre": 10.1, "calcium": 52, "iron": 4.3, "magnesium": 138,
+                "phosphorus": 410, "potassium": 362, "sodium": 6, "zinc": 3.6,
+                "vitamin_b1": 0.46, "folate": 32,
+            },
+        },
+        {
+            "id": "food_potato_baked",
+            "name": "Potato, baked, flesh and skin",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 93, "protein": 2.5, "fat": 0.1, "carbs": 21.2,
+                "fibre": 2.2, "calcium": 15, "iron": 1.1, "magnesium": 28,
+                "phosphorus": 70, "potassium": 535, "sodium": 10, "zinc": 0.4,
+                "vitamin_c": 9.6, "vitamin_b6": 0.31, "folate": 28,
+            },
+        },
+        {
+            "id": "food_sweet_potato_baked",
+            "name": "Sweet potato, baked",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 90, "protein": 2.0, "fat": 0.2, "carbs": 20.7,
+                "fibre": 3.3, "calcium": 38, "iron": 0.7, "magnesium": 27,
+                "phosphorus": 54, "potassium": 475, "sodium": 36, "zinc": 0.3,
+                "vitamin_a": 961, "vitamin_c": 19.6, "vitamin_b6": 0.29,
+            },
+        },
+        {
+            "id": "food_pasta_cooked",
+            "name": "Pasta, spaghetti, cooked",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 158, "protein": 5.8, "fat": 0.9, "carbs": 30.9,
+                "fibre": 1.8, "calcium": 7, "iron": 1.3, "magnesium": 18,
+                "phosphorus": 58, "potassium": 44, "sodium": 1, "zinc": 0.5,
+                "folate": 73,
+            },
+        },
+        {
+            "id": "food_bread_whole_wheat",
+            "name": "Bread, whole wheat",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 247, "protein": 13.0, "fat": 4.2, "carbs": 41.0,
+                "fibre": 7.0, "calcium": 107, "iron": 2.4, "magnesium": 82,
+                "phosphorus": 239, "potassium": 230, "sodium": 400, "zinc": 1.7,
+                "folate": 42,
+            },
+        },
+        {
+            "id": "food_greek_yogurt_plain",
+            "name": "Greek yogurt, plain, nonfat",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 59, "protein": 10.3, "fat": 0.4, "carbs": 3.6,
+                "sugars": 3.2, "calcium": 110, "iron": 0.1, "magnesium": 11,
+                "phosphorus": 135, "potassium": 141, "sodium": 36, "zinc": 0.5,
+                "vitamin_b12": 0.8,
+            },
+        },
+        {
+            "id": "food_milk_semi_skimmed",
+            "name": "Milk, semi-skimmed, 2% fat",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 50, "protein": 3.3, "fat": 2.0, "carbs": 4.8,
+                "sugars": 4.8, "calcium": 120, "magnesium": 11,
+                "phosphorus": 92, "potassium": 140, "sodium": 47, "zinc": 0.4,
+                "vitamin_b12": 0.5, "vitamin_d": 1.2,
+            },
+        },
+        {
+            "id": "food_tuna_canned_water",
+            "name": "Tuna, canned in water, drained",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 116, "protein": 25.5, "fat": 0.8, "carbs": 0,
+                "calcium": 11, "iron": 1.2, "magnesium": 27,
+                "phosphorus": 163, "potassium": 237, "sodium": 247, "zinc": 0.8,
+                "selenium": 80, "vitamin_b12": 2.5, "vitamin_d": 2.0,
+            },
+        },
+        {
+            "id": "food_turkey_breast_cooked",
+            "name": "Turkey breast, cooked",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 147, "protein": 30.1, "fat": 2.1, "carbs": 0,
+                "calcium": 14, "iron": 1.2, "magnesium": 28,
+                "phosphorus": 230, "potassium": 249, "sodium": 63, "zinc": 1.7,
+                "selenium": 32, "vitamin_b12": 0.4,
+            },
+        },
+        {
+            "id": "food_beef_mince_lean_cooked",
+            "name": "Beef mince, lean, cooked",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 250, "protein": 26.0, "fat": 15.0, "carbs": 0,
+                "saturated_fat": 5.8, "cholesterol": 88, "calcium": 18,
+                "iron": 2.6, "magnesium": 21, "phosphorus": 180,
+                "potassium": 318, "sodium": 72, "zinc": 6.3,
+                "selenium": 21, "vitamin_b12": 2.6,
+            },
+        },
+        {
+            "id": "food_lentils_cooked",
+            "name": "Lentils, cooked",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 116, "protein": 9.0, "fat": 0.4, "carbs": 20.1,
+                "fibre": 7.9, "calcium": 19, "iron": 3.3, "magnesium": 36,
+                "phosphorus": 180, "potassium": 369, "sodium": 2, "zinc": 1.3,
+                "folate": 181,
+            },
+        },
+        {
+            "id": "food_chickpeas_cooked",
+            "name": "Chickpeas, cooked",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 164, "protein": 8.9, "fat": 2.6, "carbs": 27.4,
+                "fibre": 7.6, "calcium": 49, "iron": 2.9, "magnesium": 48,
+                "phosphorus": 168, "potassium": 291, "sodium": 7, "zinc": 1.5,
+                "folate": 172,
+            },
+        },
+        {
+            "id": "food_kidney_beans_cooked",
+            "name": "Kidney beans, cooked",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 127, "protein": 8.7, "fat": 0.5, "carbs": 22.8,
+                "fibre": 6.4, "calcium": 28, "iron": 2.9, "magnesium": 45,
+                "phosphorus": 142, "potassium": 403, "sodium": 2, "zinc": 1.1,
+                "folate": 130,
+            },
+        },
+        {
+            "id": "food_spinach_raw",
+            "name": "Spinach, raw",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 23, "protein": 2.9, "fat": 0.4, "carbs": 3.6,
+                "fibre": 2.2, "calcium": 99, "iron": 2.7, "magnesium": 79,
+                "phosphorus": 49, "potassium": 558, "sodium": 79, "zinc": 0.5,
+                "vitamin_a": 469, "vitamin_c": 28, "vitamin_k": 483,
+                "folate": 194,
+            },
+        },
+        {
+            "id": "food_avocado",
+            "name": "Avocado, raw",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 160, "protein": 2.0, "fat": 14.7, "carbs": 8.5,
+                "fibre": 6.7, "monounsaturated_fat": 9.8,
+                "polyunsaturated_fat": 1.8, "saturated_fat": 2.1,
+                "calcium": 12, "iron": 0.6, "magnesium": 29,
+                "phosphorus": 52, "potassium": 485, "sodium": 7, "zinc": 0.6,
+                "vitamin_c": 10, "vitamin_e": 2.1, "folate": 81,
+            },
+        },
+        {
+            "id": "food_apple",
+            "name": "Apple, raw, with skin",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 52, "protein": 0.3, "fat": 0.2, "carbs": 13.8,
+                "sugars": 10.4, "fibre": 2.4, "calcium": 6, "iron": 0.1,
+                "magnesium": 5, "phosphorus": 11, "potassium": 107, "sodium": 1,
+                "vitamin_c": 4.6, "folate": 3,
+            },
+        },
+        {
+            "id": "food_orange",
+            "name": "Orange, raw",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 47, "protein": 0.9, "fat": 0.1, "carbs": 11.8,
+                "sugars": 9.4, "fibre": 2.4, "calcium": 40, "iron": 0.1,
+                "magnesium": 10, "phosphorus": 14, "potassium": 181, "sodium": 0,
+                "vitamin_c": 53.2, "folate": 30,
+            },
+        },
+        {
+            "id": "food_blueberries",
+            "name": "Blueberries, raw",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 57, "protein": 0.7, "fat": 0.3, "carbs": 14.5,
+                "sugars": 10.0, "fibre": 2.4, "calcium": 6, "iron": 0.3,
+                "magnesium": 6, "phosphorus": 12, "potassium": 77, "sodium": 1,
+                "vitamin_c": 9.7, "vitamin_k": 19.3, "folate": 6,
+            },
+        },
+        {
+            "id": "food_almonds",
+            "name": "Almonds",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 579, "protein": 21.2, "fat": 49.9, "carbs": 21.6,
+                "fibre": 12.5, "monounsaturated_fat": 31.6,
+                "polyunsaturated_fat": 12.3, "saturated_fat": 3.8,
+                "calcium": 269, "iron": 3.7, "magnesium": 270,
+                "phosphorus": 481, "potassium": 733, "sodium": 1, "zinc": 3.1,
+                "vitamin_e": 25.6, "folate": 44,
+            },
+        },
+        {
+            "id": "food_peanut_butter",
+            "name": "Peanut butter, smooth",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 588, "protein": 25.1, "fat": 50.4, "carbs": 20.0,
+                "fibre": 6.0, "sugars": 9.2, "monounsaturated_fat": 24.4,
+                "polyunsaturated_fat": 15.6, "saturated_fat": 10.1,
+                "calcium": 43, "iron": 1.9, "magnesium": 154,
+                "phosphorus": 358, "potassium": 649, "sodium": 459, "zinc": 2.5,
+                "vitamin_e": 9.1, "folate": 74,
+            },
+        },
+        {
+            "id": "food_olive_oil",
+            "name": "Olive oil",
+            "serving_name": "100 g",
+            "nutrients": {
+                "calories": 884, "protein": 0, "fat": 100, "carbs": 0,
+                "monounsaturated_fat": 73.0, "polyunsaturated_fat": 10.5,
+                "saturated_fat": 13.8, "vitamin_e": 14.4, "vitamin_k": 60.2,
+            },
+        },
+    ]
+)
+
+OFFLINE_FOOD_ALIASES = {
+    "chicken": "chicken breast",
+    "mince": "beef mince",
+    "ground beef": "beef mince",
+    "yoghurt": "yogurt",
+    "porridge": "oats",
+    "spaghetti": "pasta spaghetti",
+    "beans": "kidney beans",
+}
+
+
+def search_offline_foods(foods: list[dict], query: str, limit: int = 20) -> list[dict]:
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", query.lower()).strip()
+    cleaned = OFFLINE_FOOD_ALIASES.get(cleaned, cleaned)
+    terms = [term for term in cleaned.split() if term]
+    if not terms:
+        return []
+
+    ranked = []
+    for food in foods:
+        searchable = " ".join(
+            str(food.get(key, "")) for key in ("name", "brand", "barcode")
+        ).lower()
+        matched = sum(term in searchable for term in terms)
+        if not matched:
+            continue
+        all_terms = matched == len(terms)
+        starts = searchable.startswith(cleaned)
+        ranked.append(
+            (
+                0 if all_terms and starts else 1 if all_terms else 2,
+                -matched,
+                food.get("name", "").lower(),
+                food,
+            )
+        )
+    ranked.sort(key=lambda item: item[:3])
+    return [item[3] for item in ranked[:limit]]
+
+
+def parse_number(value: str | int | float) -> float:
+    """Parse values such as 12500, 12.5k, 2m, or '20k steps'."""
+    if isinstance(value, (int, float)):
+        result = float(value)
+    else:
+        cleaned = value.strip().lower().replace(",", "").replace("_", "")
+        match = re.fullmatch(
+            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*([km]?)\s*(?:[a-z%]+)?",
+            cleaned,
+        )
+        if not match:
+            raise ValueError("Enter a number, for example 12500 or 12.5k.")
+        result = float(match.group(1)) * {"": 1, "k": 1_000, "m": 1_000_000}[
+            match.group(2)
+        ]
+    if result < 0:
+        raise ValueError("The value cannot be negative.")
+    return result
+
+
+def period_dates(selected: date, period: str) -> list[date]:
+    if period == "week":
+        start = selected - timedelta(days=selected.weekday())
+    elif period == "month":
+        start = selected.replace(day=1)
+    else:
+        raise ValueError("Period must be 'week' or 'month'.")
+    return [start + timedelta(days=index) for index in range((selected - start).days + 1)]
+
+
+def habit_stats(habit: dict, selected: date, period: str) -> dict:
+    days = period_dates(selected, period)
+    entries = habit.get("entries", {})
+    if habit["type"] == "check":
+        completed = sum(bool(entries.get(day.isoformat(), False)) for day in days)
+        percentage = completed / len(days) * 100
+        return {
+            "average": percentage,
+            "goal_rate": percentage,
+            "completed": completed,
+            "days": len(days),
+        }
+
+    values = [float(entries.get(day.isoformat(), 0) or 0) for day in days]
+    target = float(habit["target"])
+    reached = sum(value >= target for value in values)
+    return {
+        "average": sum(values) / len(days),
+        "goal_rate": reached / len(days) * 100,
+        "completed": reached,
+        "days": len(days),
     }
 
 
-def selected_date() -> date:
-    return st.session_state.get("selected_date", date.today())
+def scaled_nutrients(food: dict, amount_g: float) -> dict:
+    factor = amount_g / 100
+    return {
+        key: float(food.get("nutrients", {}).get(key, 0) or 0) * factor
+        for key in NUTRIENT_KEYS
+    }
 
 
-def nutrition_totals(selected: date) -> dict[str, float]:
-    totals = {key: 0.0 for key in NUTRIENT_KEYS}
-    for entry in store.food_entries:
-        if entry.get("date") != selected.isoformat():
-            continue
-        food = store.get_food(entry.get("food_id", ""))
-        if not food:
-            continue
-        for key, value in scaled_nutrients(food, float(entry.get("amount_g", 0))).items():
-            totals[key] += value
-    return totals
-
-
-def profile_energy() -> tuple[float, float] | None:
-    profile = store.settings.get("profile", {})
-    weight = float(profile.get("body_weight", 0) or 0)
-    if profile.get("weight_unit") == "lb":
-        weight /= 2.2046226218
-    height = float(profile.get("height_cm", 0) or 0)
-    age = int(profile.get("age", 0) or 0)
-    if not weight or not height or not age:
-        return None
-    rmr = 10 * weight + 6.25 * height - 5 * age + (-161 if profile.get("sex") == "female" else 5)
-    multiplier = {"inactive": 1.2, "low": 1.375, "active": 1.55, "very": 1.725}.get(
-        profile.get("activity_level"), 1.55
-    )
-    adjustment = {"lose": -400, "maintain": 0, "recomposition": -100, "gain": 250, "performance": 150}.get(
-        profile.get("goal_type"), -100
-    )
-    return rmr, max(1200, rmr * multiplier + adjustment)
-
-
-def habit_done(habit: dict, selected: date) -> bool:
-    return store._habit_met(habit, habit.get("entries", {}).get(selected.isoformat()))
-
-
-def weekly_muscle_sets(selected: date | None = None) -> dict[str, float]:
-    selected = selected or date.today()
-    start = selected - timedelta(days=selected.weekday())
-    end = start + timedelta(days=6)
-    totals = {muscle: 0.0 for muscle in MUSCLES if muscle != "Other"}
-    for workout in store.workouts:
-        try:
-            workout_date = date.fromisoformat(workout["date"])
-        except (KeyError, ValueError):
-            continue
-        if not start <= workout_date <= end:
-            continue
-        exercise = store.get_exercise(workout.get("exercise_id", ""))
-        if not exercise:
-            continue
-        primary = exercise.get("muscle_group", "Other")
-        if primary in totals:
-            totals[primary] += float(workout.get("sets", 0))
-        for secondary in exercise.get("secondary_muscles", []):
-            if secondary in totals:
-                totals[secondary] += float(workout.get("sets", 0)) * 0.5
-    return {key: value for key, value in totals.items() if value}
-
-
-def readiness(entry: dict | None) -> int:
-    if not entry:
+def _off_value(nutriments: dict, source: str, factor: float = 1) -> float:
+    try:
+        return max(float(nutriments.get(f"{source}_100g", 0) or 0) * factor, 0)
+    except (TypeError, ValueError):
         return 0
-    sleep = min(100, float(entry.get("sleep_hours", 0)) / 8 * 100)
-    wellbeing = (
-        float(entry.get("sleep_quality", 3))
-        + float(entry.get("energy", 3))
-        + (6 - float(entry.get("soreness", 3)))
-        + (6 - float(entry.get("stress", 3)))
-        + float(entry.get("mood", 3))
-    ) / 25 * 100
-    return round(sleep * 0.4 + wellbeing * 0.6)
 
 
-def add_xp_for_workout(workout: dict) -> tuple[int, str]:
-    reward_key = store._workout_reward_key(workout)
-    amount = store.settings["xp_rewards"][reward_key]
-    return store.set_xp_award(f"workout:{workout['id']}", amount), reward_key
-
-
-def strength_rating(exercise: dict, estimated_1rm: float) -> tuple[str, float] | None:
-    profile = store.settings.get("profile", {})
-    body_weight = float(profile.get("body_weight", 0) or 0)
-    if profile.get("weight_unit") != exercise.get("unit", "kg"):
-        body_weight = body_weight * 2.2046226218 if profile.get("weight_unit") == "kg" else body_weight / 2.2046226218
-    if not body_weight or not estimated_1rm:
+def open_food_facts_product(product: dict) -> dict | None:
+    name = (
+        product.get("product_name")
+        or product.get("product_name_en")
+        or ""
+    ).strip()
+    barcode = re.sub(r"\D", "", str(product.get("code", "")))
+    if not name or not barcode:
         return None
-    age = int(profile.get("age", 0) or 0)
-    age_adjustment = 1 if not age or age < 50 else .95 if age < 60 else .88 if age < 70 else .8
-    thresholds = [.6, .9, 1.2, 1.5, 1.8] if exercise.get("muscle_group") == "Back" else [.4, .65, .9, 1.15, 1.4]
-    adjusted_ratio = estimated_1rm / body_weight / age_adjustment
-    tier_index = sum(adjusted_ratio >= threshold for threshold in thresholds)
-    return ["Iron", "Bronze", "Silver", "Gold", "Platinum", "Diamond"][tier_index], estimated_1rm / body_weight
+    source_map = {
+        "calories": ("energy-kcal", 1),
+        "alcohol": ("alcohol", 1),
+        "caffeine": ("caffeine", 1000),
+        "water": ("water", 1),
+        "protein": ("proteins", 1),
+        "fat": ("fat", 1),
+        "carbs": ("carbohydrates", 1),
+        "fibre": ("fiber", 1),
+        "starch": ("starch", 1),
+        "sugars": ("sugars", 1),
+        "added_sugars": ("added-sugars", 1),
+        "monounsaturated_fat": ("monounsaturated-fat", 1),
+        "polyunsaturated_fat": ("polyunsaturated-fat", 1),
+        "omega_3": ("omega-3-fat", 1),
+        "ala": ("alpha-linolenic-acid", 1),
+        "dha": ("docosahexaenoic-acid", 1),
+        "epa": ("eicosapentaenoic-acid", 1),
+        "omega_6": ("omega-6-fat", 1),
+        "arachidonic_acid": ("arachidonic-acid", 1),
+        "linoleic_acid": ("linoleic-acid", 1),
+        "saturated_fat": ("saturated-fat", 1),
+        "trans_fat": ("trans-fat", 1),
+        "cholesterol": ("cholesterol", 1000),
+        "cystine": ("cystine", 1),
+        "histidine": ("histidine", 1),
+        "isoleucine": ("isoleucine", 1),
+        "leucine": ("leucine", 1),
+        "lysine": ("lysine", 1),
+        "methionine": ("methionine", 1),
+        "phenylalanine": ("phenylalanine", 1),
+        "threonine": ("threonine", 1),
+        "tryptophan": ("tryptophan", 1),
+        "tyrosine": ("tyrosine", 1),
+        "valine": ("valine", 1),
+        "vitamin_b1": ("vitamin-b1", 1000),
+        "vitamin_b2": ("vitamin-b2", 1000),
+        "vitamin_b3": ("vitamin-pp", 1000),
+        "vitamin_b5": ("pantothenic-acid", 1000),
+        "vitamin_b6": ("vitamin-b6", 1000),
+        "vitamin_b12": ("vitamin-b12", 1_000_000),
+        "folate": ("folates", 1_000_000),
+        "vitamin_a": ("vitamin-a", 1_000_000),
+        "vitamin_c": ("vitamin-c", 1000),
+        "vitamin_d": ("vitamin-d", 1_000_000),
+        "vitamin_e": ("vitamin-e", 1000),
+        "vitamin_k": ("vitamin-k", 1_000_000),
+        "calcium": ("calcium", 1000),
+        "copper": ("copper", 1000),
+        "iron": ("iron", 1000),
+        "magnesium": ("magnesium", 1000),
+        "manganese": ("manganese", 1000),
+        "phosphorus": ("phosphorus", 1000),
+        "potassium": ("potassium", 1000),
+        "selenium": ("selenium", 1_000_000),
+        "sodium": ("sodium", 1000),
+        "zinc": ("zinc", 1000),
+    }
+    nutriments = product.get("nutriments") or {}
+    nutrients = {key: 0.0 for key in NUTRIENT_KEYS}
+    for target, (source, factor) in source_map.items():
+        nutrients[target] = _off_value(nutriments, source, factor)
+    nutrients["net_carbs"] = nutrients["carbs"]
+    return {
+        "barcode": barcode,
+        "name": name,
+        "brand": str(product.get("brands", "")).strip(),
+        "quantity": str(product.get("quantity", "")).strip(),
+        "image_url": product.get("image_front_small_url")
+        or product.get("image_front_url")
+        or "",
+        "source": "Open Food Facts",
+        "source_url": f"{OPEN_FOOD_FACTS_BASE}/product/{barcode}",
+        "serving_name": "100 g",
+        "nutrients": nutrients,
+    }
 
 
-def nutrient_progress(totals: dict, goals: dict, keys: list[str]) -> None:
-    rows = []
-    for key in keys:
-        if key not in NUTRIENT_META:
-            continue
-        label, unit, _ = NUTRIENT_META[key]
-        value = float(totals.get(key, 0))
-        goal = float(goals.get(key, 0))
-        percent = value / goal * 100 if goal else 0
-        colour = "#d14b5a" if key in LIMIT_NUTRIENTS and percent > 100 else "#19a974" if 80 <= percent <= 110 else "#5b6cff"
-        rows.append(
-            f'<div class="nutrient-row"><span>{html.escape(label)}</span>'
-            f'<span>{value:.1f} {unit}</span><div class="bar"><span style="width:{min(percent,100):.1f}%;background:{colour}"></span></div>'
-            f'<strong>{percent:.0f}%</strong></div>'
-        )
-    st.markdown("".join(rows), unsafe_allow_html=True)
+def fetch_open_food_facts(url: str) -> dict:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Habitline/1.0 (local desktop nutrition tracker)",
+            "Accept": "application/json",
+        },
+    )
+    last_error = None
+    for attempt in range(2):
+        try:
+            with urlopen(request, timeout=12) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+            last_error = error
+            if attempt == 0:
+                time.sleep(0.5)
+    raise ValueError(
+        "The online food database could not be reached. Check your internet connection and try again."
+    ) from last_error
 
 
-def home_page() -> None:
-    today = date.today()
-    game = level_stats()
-    habits_done = sum(habit_done(habit, today) for habit in store.habits)
-    habit_percent = habits_done / len(store.habits) * 100 if store.habits else 0
-    totals = nutrition_totals(today)
-    goals = store.nutrition_goals
-    latest_recovery = max(store.recovery_entries, key=lambda item: item.get("date", ""), default=None)
-    energy = profile_energy()
-    calorie_goal = energy[1] if energy and store.settings.get("profile", {}).get("auto_nutrition") else goals.get("calories", 0)
-
-    st.title("Habitline")
-    st.caption("Your habits, strength, nutrition, recovery and plan in one place.")
-    cols = st.columns(5)
-    cols[0].metric("Level", game["rank"], f"{game['xp']} XP")
-    cols[1].metric("Today's habits", f"{habit_percent:.0f}%", f"{habits_done}/{len(store.habits)} complete")
-    cols[2].metric("Calories", f"{totals['calories']:.0f}", f"of {calorie_goal:.0f} kcal")
-    cols[3].metric("Recovery", f"{readiness(latest_recovery)}%", "latest check-in")
-    cols[4].metric("Active goals", sum(not goal.get("completed") for goal in store.goals))
-    st.progress(game["progress"] / 100, text=f"{game['remaining']} XP to level {game['next']}" if game["next"] else "Maximum level")
-
-    left, right = st.columns([1.25, 1])
-    with left:
-        st.subheader("Today")
-        for habit in store.habits:
-            value = habit.get("entries", {}).get(today.isoformat())
-            status = "Complete" if habit_done(habit, today) else "Not completed"
-            st.write(f"**{habit['name']}**  ·  {status}" + (f"  ·  {value} {habit.get('unit','')}" if value is not None and habit["type"] == "number" else ""))
-        events = [
-            item for item in store.planner_events if item.get("date") == today.isoformat()
-        ]
-        for item in sorted(events, key=lambda row: row.get("start", "")):
-            st.write(f"**{item.get('start') or 'All day'}**  ·  {item['title']}")
-    with right:
-        st.subheader("Weekly lifting sets")
-        sets = weekly_muscle_sets()
-        if sets:
-            st.bar_chart(pd.DataFrame({"sets": sets}))
-            for muscle, count in sets.items():
-                message = "too many" if count > 20 else "excellent" if count >= 13 else "good" if count >= 10 else "low"
-                st.caption(f"{muscle}: {count:g}/20 sets · {message}")
-        else:
-            st.info("No lifting sets logged this week.")
-
-    st.subheader("Nutrition snapshot")
-    nutrient_progress(totals, goals, ["calories", "protein", "carbs", "fat", "fibre", "iron", "calcium", "potassium"])
-
-
-def habits_page() -> None:
-    st.title("Habits")
-    selected = selected_date()
-    st.session_state["selected_date"] = st.date_input("Tracking date", selected, key="habit_date")
-    selected = selected_date()
-
-    with st.expander("Add a habit"):
-        with st.form("add_habit"):
-            name = st.text_input("Habit name")
-            habit_type = st.selectbox("Tracking type", ["check", "number"], format_func=lambda value: "Tick box" if value == "check" else "Number target")
-            target = st.number_input("Daily target", min_value=0.01, value=1.0)
-            unit = st.text_input("Unit", placeholder="steps, pages, minutes")
-            colour = st.color_picker("Colour", DEFAULT_COLORS[0])
-            if st.form_submit_button("Add habit", use_container_width=True):
-                if not name.strip():
-                    st.error("Give the habit a name.")
-                else:
-                    store.add({
-                        "id": uuid.uuid4().hex, "name": name.strip(), "type": habit_type,
-                        "target": target if habit_type == "number" else 1, "unit": unit.strip() if habit_type == "number" else "",
-                        "color": colour, "entries": {},
-                    })
-                    rerun("Habit added")
-
-    for habit in store.habits:
-        with st.container(border=True):
-            c1, c2, c3 = st.columns([2, 1.2, 0.35])
-            c1.markdown(f"### {habit['name']}")
-            current = habit.get("entries", {}).get(selected.isoformat())
-            if habit["type"] == "check":
-                value = c2.checkbox("Completed", value=bool(current), key=f"habit_{habit['id']}_{selected}")
-            else:
-                value = c2.number_input(
-                    f"{habit.get('unit') or 'Value'} / {habit['target']:g}",
-                    min_value=0.0, value=float(current or 0), key=f"habit_{habit['id']}_{selected}",
-                )
-            save, delete = c3.columns(2)
-            if save.button("✓", key=f"save_habit_{habit['id']}", help="Save"):
-                active = store._habit_met(habit, value)
-                store.set_entry(habit["id"], selected.isoformat(), value)
-                change = store.set_xp_award(
-                    f"habit:{habit['id']}:{selected.isoformat()}",
-                    store.settings["xp_rewards"]["habit"], active,
-                )
-                rerun(f"Habit saved · {change:+d} XP" if change else "Habit saved")
-            if delete.button("×", key=f"delete_habit_{habit['id']}", help="Delete"):
-                store.revoke_xp_prefix(f"habit:{habit['id']}:")
-                store.delete(habit["id"])
-                rerun("Habit deleted")
-
-            days = [selected - timedelta(days=index) for index in range(13, -1, -1)]
-            chart = []
-            for day in days:
-                entry = habit.get("entries", {}).get(day.isoformat())
-                chart.append(100 if habit["type"] == "check" and entry else float(entry or 0))
-            st.line_chart(pd.DataFrame({"value": chart}, index=days), height=170)
-            week = habit_stats(habit, selected, "week")
-            month = habit_stats(habit, selected, "month")
-            a, b = st.columns(2)
-            a.metric("Weekly average", f"{week['average']:.1f}" + ("%" if habit["type"] == "check" else f" {habit.get('unit','')}"))
-            b.metric("Monthly average", f"{month['average']:.1f}" + ("%" if habit["type"] == "check" else f" {habit.get('unit','')}"))
-
-
-def lifting_page() -> None:
-    st.title("Strength training")
-    add_tab, log_tab, plans_tab, history_tab = st.tabs(["Exercises", "Log workout", "Workout days", "Progress"])
-
-    with add_tab:
-        with st.form("add_exercise"):
-            name = st.text_input("Exercise name")
-            unit = st.selectbox("Weight unit", ["kg", "lb"])
-            primary = st.selectbox("Primary muscle", MUSCLES)
-            secondary = st.multiselect("Secondary muscles", [value for value in MUSCLES if value != primary and value != "Other"])
-            colour = st.color_picker("Colour", DEFAULT_COLORS[0], key="exercise_colour")
-            if st.form_submit_button("Save exercise"):
-                if not name.strip():
-                    st.error("Give the exercise a name.")
-                else:
-                    store.add_exercise({
-                        "id": uuid.uuid4().hex, "name": name.strip(), "unit": unit,
-                        "color": colour, "muscle_group": primary, "secondary_muscles": secondary,
-                    })
-                    rerun("Exercise added")
-        if store.exercises:
-            selected_id = st.selectbox("Edit or delete exercise", [item["id"] for item in store.exercises], format_func=lambda value: store.get_exercise(value)["name"])
-            exercise = store.get_exercise(selected_id)
-            with st.form("edit_exercise"):
-                edited_name = st.text_input("Name", exercise["name"])
-                edited_primary = st.selectbox("Primary muscle", MUSCLES, index=MUSCLES.index(exercise.get("muscle_group", "Other")))
-                edited_secondary = st.multiselect("Secondary muscles", [value for value in MUSCLES if value != edited_primary and value != "Other"], default=[value for value in exercise.get("secondary_muscles", []) if value != edited_primary])
-                save, remove = st.columns(2)
-                if save.form_submit_button("Update"):
-                    store.update_exercise(selected_id, {"name": edited_name.strip(), "muscle_group": edited_primary, "secondary_muscles": edited_secondary})
-                    rerun("Exercise updated")
-                if remove.form_submit_button("Delete"):
-                    for workout in list(store.workouts):
-                        if workout.get("exercise_id") == selected_id:
-                            store.set_xp_award(f"workout:{workout['id']}", 0, False)
-                    store.delete_exercise(selected_id)
-                    rerun("Exercise deleted")
-
-    with log_tab:
-        if not store.exercises:
-            st.info("Add an exercise first.")
-        else:
-            with st.form("log_workout"):
-                exercise_id = st.selectbox("Exercise", [item["id"] for item in store.exercises], format_func=lambda value: store.get_exercise(value)["name"])
-                previous = sorted([item for item in store.workouts if item["exercise_id"] == exercise_id], key=lambda item: (item["date"], item["id"]), reverse=True)
-                if previous:
-                    last = previous[0]
-                    st.caption(f"Previous: {last['weight']:g} {store.get_exercise(exercise_id)['unit']} · {last['sets']} sets × {last['reps']} reps")
-                workout_date = st.date_input("Date", date.today(), key="workout_date")
-                c1, c2, c3 = st.columns(3)
-                weight = c1.number_input("Weight", min_value=0.0, value=float(previous[0]["weight"]) if previous else 0.0)
-                sets = c2.number_input("Sets", min_value=1, value=int(previous[0]["sets"]) if previous else 3)
-                reps = c3.number_input("Reps", min_value=1, value=int(previous[0]["reps"]) if previous else 8)
-                notes = st.text_input("Notes")
-                if st.form_submit_button("Log workout", use_container_width=True):
-                    workout = {"id": uuid.uuid4().hex, **validate_workout({
-                        "exercise_id": exercise_id, "date": workout_date.isoformat(),
-                        "weight": weight, "sets": sets, "reps": reps, "notes": notes,
-                    }, store)}
-                    store.add_workout(workout)
-                    change, reward = add_xp_for_workout(workout)
-                    reason = {
-                        "workout_first": "first exercise session",
-                        "workout_improvement": "weight, sets or reps improved",
-                        "workout_standard": "workout completed",
-                    }[reward]
-                    rerun(f"Workout logged · +{change} XP · {reason}")
-
-    with plans_tab:
-        if not store.exercises:
-            st.info("Add exercises before creating a workout day.")
-        else:
-            with st.form("add_workout_day"):
-                plan_name = st.text_input("Workout day name", placeholder="Push, Pull, Upper")
-                exercise_ids = st.multiselect("Exercises", [item["id"] for item in store.exercises], format_func=lambda value: store.get_exercise(value)["name"])
-                if st.form_submit_button("Create workout day"):
-                    plan = {"id": uuid.uuid4().hex, **validate_workout_day({"name": plan_name, "exercise_ids": exercise_ids}, store)}
-                    store.add_workout_day(plan)
-                    rerun("Workout day created")
-            for plan in store.workout_days:
-                with st.expander(plan["name"]):
-                    rows = [store.get_exercise(value) for value in plan["exercise_ids"] if store.get_exercise(value)]
-                    st.write(", ".join(item["name"] for item in rows))
-                    with st.form(f"log_plan_{plan['id']}"):
-                        plan_date = st.date_input("Date", date.today(), key=f"plan_date_{plan['id']}")
-                        values = []
-                        for exercise in rows:
-                            previous = sorted([item for item in store.workouts if item["exercise_id"] == exercise["id"]], key=lambda item: (item["date"], item["id"]), reverse=True)
-                            defaults = previous[0] if previous else {"weight": 0, "sets": 3, "reps": 8}
-                            st.markdown(f"**{exercise['name']}**")
-                            cols = st.columns(3)
-                            values.append({
-                                "exercise": exercise,
-                                "weight": cols[0].number_input("Weight", min_value=0.0, value=float(defaults["weight"]), key=f"pw_{plan['id']}_{exercise['id']}"),
-                                "sets": cols[1].number_input("Sets", min_value=1, value=int(defaults["sets"]), key=f"ps_{plan['id']}_{exercise['id']}"),
-                                "reps": cols[2].number_input("Reps", min_value=1, value=int(defaults["reps"]), key=f"pr_{plan['id']}_{exercise['id']}"),
-                            })
-                        if st.form_submit_button(f"Log {plan['name']}"):
-                            total_xp = 0
-                            session_id = uuid.uuid4().hex
-                            for row in values:
-                                workout = {
-                                    "id": uuid.uuid4().hex, "exercise_id": row["exercise"]["id"],
-                                    "date": plan_date.isoformat(), "weight": row["weight"],
-                                    "sets": row["sets"], "reps": row["reps"], "notes": "",
-                                    "workout_day_id": plan["id"], "session_id": session_id,
-                                }
-                                store.add_workout(workout)
-                                change, _ = add_xp_for_workout(workout)
-                                total_xp += change
-                            rerun(f"{plan['name']} logged · +{total_xp} XP")
-                    if st.button("Delete workout day", key=f"delete_plan_{plan['id']}"):
-                        store.delete_workout_day(plan["id"])
-                        rerun("Workout day deleted")
-
-    with history_tab:
-        if not store.workouts:
-            st.info("No workouts logged yet.")
-        else:
-            exercise_id = st.selectbox("View exercise", [item["id"] for item in store.exercises], format_func=lambda value: store.get_exercise(value)["name"], key="progress_exercise")
-            exercise = store.get_exercise(exercise_id)
-            workouts = sorted([item for item in store.workouts if item["exercise_id"] == exercise_id], key=lambda item: (item["date"], item["id"]))
-            if workouts:
-                frame = pd.DataFrame(workouts)
-                frame["estimated 1RM"] = frame["weight"] * (1 + frame["reps"] / 30)
-                frame["volume"] = frame["weight"] * frame["sets"] * frame["reps"]
-                rating = strength_rating(exercise, float(frame["estimated 1RM"].max()))
-                if rating:
-                    st.markdown(f"<span class='rank'>{rating[0]}</span> &nbsp; **{rating[1]:.2f}× bodyweight**", unsafe_allow_html=True)
-                    st.caption("Informal relative-strength benchmark based on your profile and best estimated one-rep maximum.")
-                else:
-                    st.info("Add age and bodyweight in Settings to calculate a strength rank.")
-                st.line_chart(frame.set_index("date")[["weight", "estimated 1RM"]])
-                st.dataframe(frame[["date", "weight", "sets", "reps", "volume", "estimated 1RM", "notes"]], use_container_width=True, hide_index=True)
-                delete_id = st.selectbox("Delete a workout", [item["id"] for item in reversed(workouts)], format_func=lambda value: next(item for item in workouts if item["id"] == value)["date"])
-                if st.button("Delete selected workout"):
-                    store.set_xp_award(f"workout:{delete_id}", 0, False)
-                    store.delete_workout(delete_id)
-                    rerun("Workout deleted")
-            st.subheader("Sets per muscle this week")
-            sets = weekly_muscle_sets()
-            if sets:
-                st.bar_chart(pd.DataFrame({"sets": sets}))
-
-
-def food_page() -> None:
-    st.title("Food and nutrition")
-    food_date = st.date_input("Food date", selected_date(), key="food_date")
-    st.session_state["selected_date"] = food_date
-    totals = nutrition_totals(food_date)
-    goals = store.nutrition_goals
-    c1, c2, c3, c4, c5 = st.columns(5)
-    for column, key in zip((c1, c2, c3, c4, c5), ("calories", "protein", "carbs", "fat", "fibre")):
-        label, unit, _ = NUTRIENT_META[key]
-        column.metric(label, f"{totals[key]:.1f} {unit}", f"{totals[key] / goals[key] * 100:.0f}% of goal" if goals.get(key) else "No target")
-
-    add_tab, detail_tab, library_tab, meals_tab = st.tabs(["Add food", "Daily nutrients", "Food library", "Meals & shopping"])
-    with add_tab:
-        query = st.text_input("Search offline food library")
-        options = search_offline_foods(store.foods, query, 30) if query else store.foods[:30]
-        if options:
-            food_id = st.selectbox("Food", [item["id"] for item in options], format_func=lambda value: store.get_food(value)["name"])
-            amount = st.number_input("Amount (g)", min_value=1.0, value=100.0)
-            if st.button("Add food", type="primary"):
-                entry = {"id": uuid.uuid4().hex, **validate_food_entry({"food_id": food_id, "date": food_date.isoformat(), "amount_g": amount}, store)}
-                store.add_food_entry(entry)
-                rerun("Food added")
-        action_cols = st.columns(2)
-        if action_cols[0].button("Repeat yesterday's food"):
-            yesterday = food_date - timedelta(days=1)
-            previous = [item for item in store.food_entries if item["date"] == yesterday.isoformat()]
-            for item in previous:
-                store.add_food_entry({
-                    "id": uuid.uuid4().hex, "food_id": item["food_id"],
-                    "date": food_date.isoformat(), "amount_g": item["amount_g"],
-                })
-            rerun(f"Repeated {len(previous)} food entries" if previous else "No food was logged yesterday")
-        st.divider()
-        st.subheader("Barcode lookup")
-        barcode = st.text_input("UPC / EAN barcode")
-        if st.button("Look up barcode"):
-            cleaned = "".join(character for character in barcode if character.isdigit())
-            existing = next((item for item in store.foods if item.get("barcode") == cleaned), None)
-            if existing:
-                st.session_state["barcode_food"] = existing
-            elif cleaned:
-                try:
-                    payload = fetch_open_food_facts(
-                        f"{OPEN_FOOD_FACTS_BASE}/api/v2/product/{cleaned}.json?fields={OPEN_FOOD_FACTS_FIELDS}"
-                    )
-                    st.session_state["barcode_food"] = open_food_facts_product(payload.get("product", {}))
-                except ValueError as error:
-                    st.error(str(error))
-        barcode_food = st.session_state.get("barcode_food")
-        if barcode_food:
-            st.write(f"**{barcode_food['name']}** · {barcode_food.get('brand', '')}")
-            if not store.get_food(barcode_food.get("id", "")) and st.button("Save barcode product"):
-                saved = {"id": uuid.uuid4().hex, **validate_food(barcode_food)}
-                store.add_food(saved)
-                st.session_state.pop("barcode_food", None)
-                rerun("Barcode product saved")
-        st.divider()
-        st.subheader("Optional online USDA search")
-        online_query = st.text_input("USDA search", placeholder="chicken breast")
-        if st.button("Search USDA"):
-            try:
-                st.session_state["usda_results"] = fetch_usda_foods(online_query, store.settings.get("usda_api_key", "DEMO_KEY"))
-            except ValueError as error:
-                st.error(str(error))
-        results = st.session_state.get("usda_results", [])
-        if results:
-            result_index = st.selectbox("USDA result", range(len(results)), format_func=lambda index: results[index]["name"])
-            if st.button("Save selected USDA food"):
-                raw = results[result_index]
-                existing = next((item for item in store.foods if item.get("fdc_id") == raw.get("fdc_id")), None)
-                if existing:
-                    rerun("That USDA food is already saved")
-                food = {"id": uuid.uuid4().hex, **validate_food(raw)}
-                food["fdc_id"] = raw.get("fdc_id", "")
-                store.add_food(food)
-                rerun("USDA food saved to your library")
-
-        entries = [item for item in store.food_entries if item["date"] == food_date.isoformat()]
-        if entries:
-            st.subheader("Today's entries")
-            for entry in entries:
-                food = store.get_food(entry["food_id"])
-                cols = st.columns([3, 1, .5])
-                cols[0].write(f"**{food['name']}**")
-                cols[1].write(f"{entry['amount_g']:g} g")
-                if cols[2].button("Delete", key=f"delete_food_entry_{entry['id']}"):
-                    store.delete_food_entry(entry["id"])
-                    rerun("Food entry deleted")
-
-    with detail_tab:
-        for group in ["General", "Carbohydrates", "Lipids", "Protein & Amino Acids", "Vitamins", "Minerals"]:
-            keys = [key for key, (_, _, nutrient_group) in NUTRIENT_META.items() if nutrient_group == group]
-            st.subheader(group)
-            nutrient_progress(totals, goals, keys)
-
-    with library_tab:
-        with st.expander("Create a custom food"):
-            with st.form("custom_food"):
-                name = st.text_input("Food name")
-                brand = st.text_input("Brand")
-                barcode = st.text_input("Barcode")
-                macro_cols = st.columns(5)
-                macro_keys = ["calories", "protein", "carbs", "fat", "fibre"]
-                values = {key: macro_cols[index].number_input(NUTRIENT_META[key][0] + " / 100g", min_value=0.0) for index, key in enumerate(macro_keys)}
-                if st.form_submit_button("Save custom food"):
-                    nutrients = {key: 0 for key in NUTRIENT_KEYS}
-                    nutrients.update(values)
-                    store.add_food({"id": uuid.uuid4().hex, **validate_food({"name": name, "brand": brand, "barcode": barcode, "nutrients": nutrients})})
-                    rerun("Custom food added")
-        st.dataframe(pd.DataFrame([{
-            "name": item["name"], "brand": item.get("brand", ""),
-            "calories": item["nutrients"].get("calories", 0),
-            "protein": item["nutrients"].get("protein", 0),
-            "carbs": item["nutrients"].get("carbs", 0),
-            "fat": item["nutrients"].get("fat", 0),
-        } for item in store.foods]), use_container_width=True, hide_index=True)
-
-    with meals_tab:
-        st.subheader("Saved meals")
-        if store.foods:
-            with st.form("save_meal"):
-                meal_name = st.text_input("Meal name")
-                meal_food = st.selectbox("Food", [item["id"] for item in store.foods], format_func=lambda value: store.get_food(value)["name"], key="meal_food")
-                meal_amount = st.number_input("Amount (g)", min_value=1.0, value=100.0, key="meal_amount")
-                servings = st.number_input("Servings", min_value=1, value=1)
-                instructions = st.text_area("Instructions")
-                if st.form_submit_button("Save meal"):
-                    meal = {"id": uuid.uuid4().hex, **validate_meal({"name": meal_name, "items": [{"food_id": meal_food, "amount_g": meal_amount}], "servings": servings, "instructions": instructions}, store)}
-                    store.add_item("meals", meal)
-                    rerun("Meal saved")
-        for meal in store.meals:
-            cols = st.columns([3, 1, 1])
-            cols[0].write(f"**{meal['name']}** · {meal['servings']} serving(s)")
-            if cols[1].button("Log today", key=f"log_meal_{meal['id']}"):
-                for item in meal["items"]:
-                    store.add_food_entry({"id": uuid.uuid4().hex, "food_id": item["food_id"], "date": food_date.isoformat(), "amount_g": item["amount_g"] / meal["servings"]})
-                rerun("Meal logged")
-            if cols[2].button("Delete", key=f"delete_meal_{meal['id']}"):
-                store.delete_item("meals", meal["id"])
-                rerun("Meal deleted")
-        st.subheader("Shopping list")
-        with st.form("shopping"):
-            shopping_name = st.text_input("Item")
-            shopping_amount = st.text_input("Amount")
-            if st.form_submit_button("Add shopping item"):
-                store.add_item("shopping_items", {"id": uuid.uuid4().hex, **validate_shopping_item({"name": shopping_name, "amount": shopping_amount})})
-                rerun("Shopping item added")
-        for item in store.shopping_items:
-            checked = st.checkbox(f"{item['name']} · {item.get('amount','')}", value=item.get("checked", False), key=f"shop_{item['id']}")
-            if checked != item.get("checked", False):
-                store.update_item("shopping_items", item["id"], {"checked": checked})
-
-
-def body_page() -> None:
-    st.title("Body and recovery")
-    body_tab, recovery_tab = st.tabs(["Body progress", "Recovery"])
-    with body_tab:
-        with st.form("body_entry"):
-            body_date = st.date_input("Date", date.today(), key="body_date")
-            cols = st.columns(3)
-            weight = cols[0].number_input("Weight", min_value=1.0, value=float(store.settings.get("profile", {}).get("body_weight", 70) or 70))
-            body_fat = cols[1].number_input("Body fat %", min_value=0.0)
-            waist = cols[2].number_input("Waist", min_value=0.0)
-            cols2 = st.columns(3)
-            chest = cols2[0].number_input("Chest", min_value=0.0)
-            hips = cols2[1].number_input("Hips", min_value=0.0)
-            arm = cols2[2].number_input("Arm", min_value=0.0)
-            note = st.text_input("Note")
-            if st.form_submit_button("Save measurement"):
-                entry = {"id": uuid.uuid4().hex, **validate_body_entry({
-                    "date": body_date.isoformat(), "weight": weight, "body_fat": body_fat,
-                    "waist": waist, "chest": chest, "hips": hips, "arm": arm, "note": note,
-                })}
-                store.add_item("body_entries", entry)
-                rerun("Body measurement saved")
-        if store.body_entries:
-            frame = pd.DataFrame(sorted(store.body_entries, key=lambda item: item["date"]))
-            st.line_chart(frame.set_index("date")[[key for key in ("weight", "body_fat", "waist") if key in frame]])
-            st.dataframe(frame.drop(columns=["id", "photo"], errors="ignore"), use_container_width=True, hide_index=True)
-
-    with recovery_tab:
-        with st.form("recovery_entry"):
-            recovery_date = st.date_input("Date", date.today(), key="recovery_date")
-            sleep = st.number_input("Sleep hours", min_value=0.0, max_value=24.0, value=8.0, step=.25)
-            cols = st.columns(5)
-            quality = cols[0].slider("Sleep quality", 1, 5, 3)
-            energy = cols[1].slider("Energy", 1, 5, 3)
-            soreness = cols[2].slider("Soreness", 1, 5, 3)
-            stress = cols[3].slider("Stress", 1, 5, 3)
-            mood = cols[4].slider("Mood", 1, 5, 3)
-            note = st.text_input("Recovery note")
-            if st.form_submit_button("Save recovery check-in"):
-                entry = {"id": uuid.uuid4().hex, **validate_recovery_entry({
-                    "date": recovery_date.isoformat(), "sleep_hours": sleep,
-                    "sleep_quality": quality, "energy": energy, "soreness": soreness,
-                    "stress": stress, "mood": mood, "note": note,
-                })}
-                store.add_item("recovery_entries", entry)
-                rerun("Recovery check-in saved")
-        if store.recovery_entries:
-            rows = sorted(store.recovery_entries, key=lambda item: item["date"])
-            frame = pd.DataFrame([{"date": item["date"], "sleep": item["sleep_hours"], "energy": item["energy"], "readiness": readiness(item)} for item in rows])
-            chart_cols = st.columns(3)
-            chart_cols[0].line_chart(frame.set_index("date")[["sleep"]])
-            chart_cols[1].line_chart(frame.set_index("date")[["energy"]])
-            chart_cols[2].line_chart(frame.set_index("date")[["readiness"]])
-
-
-def planner_page() -> None:
-    st.title("Planner and timetable")
-    once_tab, recurring_tab = st.tabs(["Calendar items", "Weekly timetable"])
-    with once_tab:
-        with st.form("planner_event"):
-            title = st.text_input("Activity")
-            event_date = st.date_input("Date", date.today(), key="event_date")
-            cols = st.columns(3)
-            event_type = cols[0].selectbox("Type", ["workout", "meal", "habit", "note"])
-            start = cols[1].time_input("Start", datetime.strptime("09:00", "%H:%M").time())
-            end = cols[2].time_input("End", datetime.strptime("10:00", "%H:%M").time())
-            note = st.text_input("Note")
-            if st.form_submit_button("Add calendar item"):
-                item = {"id": uuid.uuid4().hex, **validate_planner_event({
-                    "title": title, "date": event_date.isoformat(), "type": event_type,
-                    "start": start.strftime("%H:%M"), "end": end.strftime("%H:%M"), "note": note,
-                })}
-                store.add_item("planner_events", item)
-                rerun("Calendar item added")
-        events = sorted(store.planner_events, key=lambda item: (item["date"], item.get("start", "")))
-        for item in events:
-            cols = st.columns([.5, 3, 1, .6])
-            done = cols[0].checkbox("", value=item.get("done", False), key=f"event_done_{item['id']}")
-            if done != item.get("done", False):
-                store.update_item("planner_events", item["id"], {"done": done})
-            cols[1].write(f"**{item['title']}** · {item['date']} · {item.get('start','')}-{item.get('end','')}")
-            cols[2].write(item["type"])
-            if cols[3].button("Delete", key=f"delete_event_{item['id']}"):
-                store.delete_item("planner_events", item["id"])
-                rerun("Calendar item deleted")
-        st.caption("Planner completion does not award XP.")
-
-    with recurring_tab:
-        with st.form("schedule_item"):
-            schedule_title = st.text_input("Repeating activity")
-            cols = st.columns(4)
-            weekday = cols[0].selectbox("Every", range(7), format_func=lambda value: WEEKDAYS[value])
-            schedule_type = cols[1].selectbox("Type", ["workout", "meal", "habit", "note"])
-            schedule_start = cols[2].time_input("Start", datetime.strptime("09:00", "%H:%M").time(), key="schedule_start")
-            schedule_end = cols[3].time_input("End", datetime.strptime("10:00", "%H:%M").time(), key="schedule_end")
-            colour = st.color_picker("Colour", DEFAULT_COLORS[0], key="schedule_colour")
-            if st.form_submit_button("Add repeating activity"):
-                item = {"id": uuid.uuid4().hex, **validate_weekly_schedule_item({
-                    "title": schedule_title, "weekday": weekday, "type": schedule_type,
-                    "start": schedule_start.strftime("%H:%M"), "end": schedule_end.strftime("%H:%M"), "color": colour,
-                })}
-                store.add_item("weekly_schedule", item)
-                rerun("Repeating activity added")
-        columns = st.columns(7)
-        for day_index, column in enumerate(columns):
-            column.markdown(f"**{WEEKDAYS[day_index][:3]}**")
-            for item in sorted([row for row in store.weekly_schedule if row["weekday"] == day_index], key=lambda row: row.get("start", "")):
-                column.markdown(
-                    f"<div class='card' style='border-left:5px solid {item.get('color', DEFAULT_COLORS[0])};padding:10px'>"
-                    f"<strong>{html.escape(item['title'])}</strong><br><span class='muted'>{item.get('start') or 'All day'}"
-                    f"{' - ' + item.get('end') if item.get('end') else ''}</span></div>",
-                    unsafe_allow_html=True,
-                )
-                if column.button("×", key=f"delete_schedule_{item['id']}"):
-                    store.delete_item("weekly_schedule", item["id"])
-                    rerun("Repeating activity deleted")
-
-
-def journal_page() -> None:
-    st.title("Journal and goals")
-    journal_tab, goals_tab = st.tabs(["Journal", "Goals"])
-    with journal_tab:
-        with st.form("journal"):
-            journal_date = st.date_input("Date", date.today(), key="journal_date")
-            title = st.text_input("Title", "Daily reflection")
-            mood = st.slider("Mood", 1, 5, 3)
-            content = st.text_area("What happened today?")
-            win = st.text_input("Today's win")
-            gratitude = st.text_input("Grateful for")
-            if st.form_submit_button("Save journal entry"):
-                entry = {"id": uuid.uuid4().hex, **validate_journal_entry({
-                    "date": journal_date.isoformat(), "title": title, "mood": mood,
-                    "content": content, "win": win, "gratitude": gratitude,
-                })}
-                store.add_item("journal_entries", entry)
-                change = store.set_xp_award(f"journal:{entry['id']}", store.settings["xp_rewards"]["journal"])
-                rerun(f"Journal saved · +{change} XP")
-        for entry in sorted(store.journal_entries, key=lambda item: item["date"], reverse=True):
-            with st.expander(f"{entry['date']} · {entry['title']} · Mood {entry['mood']}/5"):
-                st.write(entry["content"])
-                if entry.get("win"):
-                    st.success(f"Win: {entry['win']}")
-                if entry.get("gratitude"):
-                    st.info(f"Grateful for: {entry['gratitude']}")
-                if st.button("Delete entry", key=f"delete_journal_{entry['id']}"):
-                    store.set_xp_award(f"journal:{entry['id']}", 0, False)
-                    store.delete_item("journal_entries", entry["id"])
-                    rerun("Journal entry deleted")
-
-    with goals_tab:
-        with st.form("goal"):
-            goal_title = st.text_input("Goal")
-            category = st.selectbox("Category", ["body", "strength", "running", "nutrition", "habit", "personal"])
-            cols = st.columns(3)
-            current = cols[0].number_input("Current", min_value=0.0)
-            target = cols[1].number_input("Target", min_value=0.0)
-            unit = cols[2].text_input("Unit")
-            deadline = st.date_input("Deadline", date.today() + timedelta(days=90))
-            notes = st.text_area("Notes")
-            if st.form_submit_button("Add goal"):
-                goal = {"id": uuid.uuid4().hex, **validate_goal({
-                    "title": goal_title, "category": category, "current_value": current,
-                    "target_value": target, "unit": unit, "deadline": deadline.isoformat(),
-                    "completed": False, "notes": notes,
-                })}
-                store.add_item("goals", goal)
-                rerun("Goal added")
-        for goal in store.goals:
-            with st.container(border=True):
-                cols = st.columns([3, 1, 1])
-                cols[0].write(f"**{goal['title']}** · {goal['current_value']:g}/{goal['target_value']:g} {goal.get('unit','')}")
-                completed = cols[1].checkbox("Complete", value=goal.get("completed", False), key=f"goal_complete_{goal['id']}")
-                if completed != goal.get("completed", False):
-                    store.update_item("goals", goal["id"], {"completed": completed})
-                    change = store.set_xp_award(f"goal:{goal['id']}", store.settings["xp_rewards"]["goal"], completed)
-                    rerun(f"Goal updated · {change:+d} XP" if change else "Goal updated")
-                if cols[2].button("Delete", key=f"delete_goal_{goal['id']}"):
-                    store.set_xp_award(f"goal:{goal['id']}", 0, False)
-                    store.delete_item("goals", goal["id"])
-                    rerun("Goal deleted")
-
-
-def kickboxing_page() -> None:
-    st.title("Kickboxing syllabus and audio coach")
-    grade_name = st.selectbox("Grade", [item[0] for item in KICKBOXING])
-    grade = next(item for item in KICKBOXING if item[0] == grade_name)
-    st.markdown(f"**Focus:** {grade[1]}")
-    combo = st.selectbox("Combination", grade[2])
-    repeats = st.number_input("Repetitions", min_value=1, max_value=100, value=5)
-    rate = kickboxing_grade_xp(grade_name)
-    st.info(f"{rate} XP per completed repetition · {rate * repeats} XP if the complete audio drill is finished.")
-
-    safe_combo = json.dumps(combo.replace(">", ","))
-    audio_html = f"""
-    <div style="font-family:system-ui;padding:12px;border:1px solid #dfe4ee;border-radius:14px">
-      <button onclick="startDrill()" style="padding:10px 18px;border:0;border-radius:10px;background:#5b6cff;color:white;font-weight:700">Start audio</button>
-      <button onclick="speechSynthesis.cancel()" style="padding:10px 18px;border:1px solid #ccd3df;border-radius:10px;background:white;font-weight:700">Stop</button>
-      <p id="status">Ready</p>
-    </div>
-    <script>
-    function speak(text) {{
-      return new Promise(resolve => {{
-        const voice = new SpeechSynthesisUtterance(text);
-        voice.rate = 0.82;
-        voice.pitch = 0.95;
-        voice.onend = resolve;
-        voice.onerror = resolve;
-        speechSynthesis.speak(voice);
-      }});
-    }}
-    async function startDrill() {{
-      speechSynthesis.cancel();
-      document.getElementById("status").textContent = "Running";
-      for (let i=1; i<={int(repeats)}; i++) {{
-        await speak({safe_combo});
-        if (!speechSynthesis.speaking && i < {int(repeats)}) await new Promise(r => setTimeout(r, 700));
-        document.getElementById("status").textContent = `Repetition ${{i}} of {int(repeats)}`;
-      }}
-      document.getElementById("status").textContent = "Complete. Confirm below to save XP.";
-    }}
-    </script>
-    """
-    components.html(audio_html, height=115)
-    st.caption("Only confirm completion after the audio reaches the end. Stopped or interrupted drills should not be saved.")
-    if st.button("Confirm completed drill", type="primary"):
-        session = {"id": uuid.uuid4().hex, **validate_kickboxing_session({
-            "date": date.today().isoformat(), "score": 0, "attempts": repeats,
-            "hits": repeats, "belt": grade_name, "mode": "audio-drill", "combo": combo,
-        })}
-        session["xp_awarded"] = rate * int(repeats)
-        store.add_item("kickboxing_sessions", session)
-        change = store.set_xp_award(f"kickboxing:{session['id']}", session["xp_awarded"])
-        rerun(f"Kickboxing drill complete · +{change} XP")
-    if store.kickboxing_sessions:
-        st.subheader("Practice history")
-        st.dataframe(pd.DataFrame(sorted(store.kickboxing_sessions, key=lambda item: item["date"], reverse=True)), use_container_width=True, hide_index=True)
-
-
-def settings_page() -> None:
-    st.title("Profile, XP and data")
-    profile_tab, xp_tab, nutrition_tab, data_tab = st.tabs(["Profile", "XP values", "Nutrition targets", "Backup"])
-    profile = store.settings.get("profile", {})
-    with profile_tab:
-        with st.form("profile"):
-            display_name = st.text_input("Name", profile.get("display_name", ""))
-            cols = st.columns(4)
-            age = cols[0].number_input("Age", min_value=0, max_value=100, value=int(profile.get("age", 0)))
-            sex = cols[1].selectbox("Sex", ["male", "female"], index=1 if profile.get("sex") == "female" else 0)
-            height = cols[2].number_input("Height (cm)", min_value=0.0, value=float(profile.get("height_cm", 0)))
-            weight = cols[3].number_input("Bodyweight", min_value=0.0, value=float(profile.get("body_weight", 0)))
-            cols2 = st.columns(4)
-            weight_unit = cols2[0].selectbox("Weight unit", ["kg", "lb"], index=1 if profile.get("weight_unit") == "lb" else 0)
-            activity = cols2[1].selectbox("Activity", ["inactive", "low", "active", "very"], index=["inactive", "low", "active", "very"].index(profile.get("activity_level", "active")))
-            goal = cols2[2].selectbox("Goal", ["lose", "maintain", "recomposition", "gain", "performance"], index=["lose", "maintain", "recomposition", "gain", "performance"].index(profile.get("goal_type", "recomposition")))
-            experience = cols2[3].selectbox("Training experience", ["beginner", "intermediate", "advanced"], index=["beginner", "intermediate", "advanced"].index(profile.get("training_experience", "beginner")))
-            auto_nutrition = st.checkbox("Calculate nutrition targets from profile", value=profile.get("auto_nutrition", True))
-            api_key = st.text_input("Optional USDA API key", store.settings.get("usda_api_key", "DEMO_KEY"))
-            if st.form_submit_button("Save profile"):
-                store.update_settings({"profile": {
-                    "display_name": display_name.strip(), "age": int(age), "sex": sex,
-                    "height_cm": height, "body_weight": weight, "weight_unit": weight_unit,
-                    "activity_level": activity, "goal_type": goal,
-                    "training_experience": experience, "auto_nutrition": auto_nutrition,
-                }, "usda_api_key": api_key})
-                rerun("Profile saved")
-        energy = profile_energy()
-        if energy:
-            c1, c2 = st.columns(2)
-            c1.metric("Estimated RMR", f"{energy[0]:.0f} kcal")
-            c2.metric("Estimated daily target", f"{energy[1]:.0f} kcal")
-            st.caption("Mifflin-St Jeor estimate. It is guidance, not medical advice.")
-
-    with xp_tab:
-        rewards = store.settings.get("xp_rewards", DEFAULT_XP_REWARDS)
-        with st.form("xp_settings"):
-            labels = {
-                "habit": "Habit target met", "workout_first": "First exercise session",
-                "workout_improvement": "Weight, sets or reps improved",
-                "workout_standard": "Workout without improvement",
-                "journal": "Journal entry", "goal": "Completed personal goal",
-            }
-            values = {}
-            columns = st.columns(2)
-            for index, key in enumerate(DEFAULT_XP_REWARDS):
-                values[key] = columns[index % 2].number_input(labels[key], min_value=0, max_value=10000, value=int(rewards.get(key, DEFAULT_XP_REWARDS[key])), key=f"xp_{key}")
-            if st.form_submit_button("Save XP values"):
-                store.update_settings({"xp_rewards": values})
-                rerun("XP values updated")
-        st.caption("A workout receives one category: first session, improvement, or standard. Planner and food do not award XP.")
-        if st.button("Reset level to F with 0 XP"):
-            store.reset_xp()
-            rerun("XP reset")
-
-    with nutrition_tab:
-        with st.form("nutrition_goals"):
-            edited = {}
-            for group in ["General", "Carbohydrates", "Lipids", "Protein & Amino Acids", "Vitamins", "Minerals"]:
-                st.markdown(f"**{group}**")
-                keys = [key for key, (_, _, nutrient_group) in NUTRIENT_META.items() if nutrient_group == group]
-                cols = st.columns(3)
-                for index, key in enumerate(keys):
-                    label, unit, _ = NUTRIENT_META[key]
-                    edited[key] = cols[index % 3].number_input(f"{label} ({unit})", min_value=0.0, value=float(store.nutrition_goals.get(key, DEFAULT_NUTRITION_GOALS[key])), key=f"goal_{key}")
-            for key in NUTRIENT_KEYS:
-                edited.setdefault(key, float(store.nutrition_goals.get(key, DEFAULT_NUTRITION_GOALS[key])))
-            if st.form_submit_button("Save nutrient targets"):
-                store.update_nutrition_goals(validate_nutrition_goals(edited))
-                rerun("Nutrition targets saved")
-
-    with data_tab:
-        backup = json.dumps(store.all_data(), indent=2)
-        st.download_button("Download complete backup", backup, file_name="habitline-streamlit-backup.json", mime="application/json")
-        upload = st.file_uploader("Restore a Habitline backup", type=["json"])
-        if upload and st.button("Import backup"):
-            store.import_data(json.load(upload))
-            rerun("Backup imported")
-        st.caption(f"Streamlit data file: {DATA_FILE}")
-
-
-PAGES = {
-    "Home": home_page,
-    "Habits": habits_page,
-    "Lifting": lifting_page,
-    "Food": food_page,
-    "Body": body_page,
-    "Planner": planner_page,
-    "Journal": journal_page,
-    "Kickboxing": kickboxing_page,
-    "Settings": settings_page,
+USDA_NUTRIENT_NAMES = {
+    "energy": "calories",
+    "energy (atwater general factors)": "calories",
+    "energy (atwater specific factors)": "calories",
+    "water": "water",
+    "protein": "protein",
+    "total lipid (fat)": "fat",
+    "carbohydrate, by difference": "carbs",
+    "fiber, total dietary": "fibre",
+    "fiber, insoluble": "insoluble_fibre",
+    "fiber, soluble": "soluble_fibre",
+    "starch": "starch",
+    "sugars, total including nlea": "sugars",
+    "sugars, total": "sugars",
+    "sugars, added": "added_sugars",
+    "fatty acids, total monounsaturated": "monounsaturated_fat",
+    "fatty acids, total polyunsaturated": "polyunsaturated_fat",
+    "fatty acids, total saturated": "saturated_fat",
+    "fatty acids, total trans": "trans_fat",
+    "cholesterol": "cholesterol",
+    "caffeine": "caffeine",
+    "alcohol, ethyl": "alcohol",
+    "cystine": "cystine",
+    "histidine": "histidine",
+    "isoleucine": "isoleucine",
+    "leucine": "leucine",
+    "lysine": "lysine",
+    "methionine": "methionine",
+    "phenylalanine": "phenylalanine",
+    "threonine": "threonine",
+    "tryptophan": "tryptophan",
+    "tyrosine": "tyrosine",
+    "valine": "valine",
+    "thiamin": "vitamin_b1",
+    "riboflavin": "vitamin_b2",
+    "niacin": "vitamin_b3",
+    "pantothenic acid": "vitamin_b5",
+    "vitamin b-6": "vitamin_b6",
+    "vitamin b-12": "vitamin_b12",
+    "folate, total": "folate",
+    "vitamin a, rae": "vitamin_a",
+    "vitamin c, total ascorbic acid": "vitamin_c",
+    "vitamin d (d2 + d3)": "vitamin_d",
+    "vitamin e (alpha-tocopherol)": "vitamin_e",
+    "vitamin k (phylloquinone)": "vitamin_k",
+    "calcium, ca": "calcium",
+    "copper, cu": "copper",
+    "iron, fe": "iron",
+    "magnesium, mg": "magnesium",
+    "manganese, mn": "manganese",
+    "phosphorus, p": "phosphorus",
+    "potassium, k": "potassium",
+    "selenium, se": "selenium",
+    "sodium, na": "sodium",
+    "zinc, zn": "zinc",
+    "18:3 n-3 c,c,c (ala)": "ala",
+    "20:5 n-3 (epa)": "epa",
+    "22:6 n-3 (dha)": "dha",
+    "18:2 n-6 c,c": "linoleic_acid",
+    "20:4 undifferentiated": "arachidonic_acid",
+}
+NUTRIENT_TARGET_UNITS = {
+    **{key: "g" for key in NUTRIENT_KEYS},
+    "calories": "kcal",
+    "caffeine": "mg",
+    "cholesterol": "mg",
+    "vitamin_b1": "mg",
+    "vitamin_b2": "mg",
+    "vitamin_b3": "mg",
+    "vitamin_b5": "mg",
+    "vitamin_b6": "mg",
+    "vitamin_b12": "mcg",
+    "folate": "mcg",
+    "vitamin_a": "mcg",
+    "vitamin_c": "mg",
+    "vitamin_d": "mcg",
+    "vitamin_e": "mg",
+    "vitamin_k": "mcg",
+    "calcium": "mg",
+    "copper": "mg",
+    "iron": "mg",
+    "magnesium": "mg",
+    "manganese": "mg",
+    "phosphorus": "mg",
+    "potassium": "mg",
+    "selenium": "mcg",
+    "sodium": "mg",
+    "zinc": "mg",
 }
 
-with st.sidebar:
-    st.image(str(ROOT / "icon-192.png"), width=64)
-    st.markdown("## Habitline")
-    st.caption("Streamlit edition")
-    page = st.radio("Navigation", list(PAGES), label_visibility="collapsed")
-    game = level_stats()
-    st.markdown(f"<span class='rank'>Level {game['rank']}</span>", unsafe_allow_html=True)
-    st.write(f"**{game['xp']} XP**")
-    st.progress(game["progress"] / 100)
-    dark_mode = st.toggle("Dark display", value=st.session_state.get("dark_mode", False))
-    st.session_state["dark_mode"] = dark_mode
-    if st.button("Reload saved data", use_container_width=True):
-        reload_store()
-        rerun("Data reloaded")
 
-show_flash()
-if st.session_state.get("dark_mode"):
-    st.markdown(
-        """
-        <style>
-        .stApp { background:#0f131a !important; color:#f2f4f8 !important; }
-        div[data-testid="stMetric"], .card { background:#181e28 !important; border-color:#2a3442 !important; }
-        [data-testid="stHeader"] { background:#0f131a !important; }
-        </style>
-        """,
-        unsafe_allow_html=True,
+def convert_nutrient_unit(value: float, source: str, target: str) -> float:
+    source = source.lower().replace("µ", "u")
+    target = target.lower()
+    if source == "kj" and target == "kcal":
+        return value / 4.184
+    aliases = {"ug": "mcg", "µg": "mcg"}
+    source = aliases.get(source, source)
+    factors = {"g": 1_000_000, "mg": 1_000, "mcg": 1}
+    if source in factors and target in factors:
+        return value * factors[source] / factors[target]
+    return value
+
+
+def usda_food_product(food: dict) -> dict | None:
+    name = str(food.get("description") or "").strip()
+    fdc_id = food.get("fdcId")
+    if not name or not fdc_id:
+        return None
+    nutrients = {key: 0 for key in NUTRIENT_KEYS}
+    for row in food.get("foodNutrients") or []:
+        nutrient = row.get("nutrient") or {}
+        nutrient_name = str(
+            row.get("nutrientName") or nutrient.get("name") or ""
+        ).strip().lower()
+        key = USDA_NUTRIENT_NAMES.get(nutrient_name)
+        if not key:
+            continue
+        value = row.get("value", row.get("amount", 0))
+        unit = str(row.get("unitName") or nutrient.get("unitName") or "")
+        try:
+            nutrients[key] = round(
+                convert_nutrient_unit(
+                    float(value or 0), unit, NUTRIENT_TARGET_UNITS[key]
+                ),
+                6,
+            )
+        except (TypeError, ValueError):
+            continue
+    nutrients["net_carbs"] = max(
+        0, nutrients["carbs"] - nutrients["fibre"]
     )
-PAGES[page]()
+    nutrients["omega_3"] = (
+        nutrients["ala"] + nutrients["epa"] + nutrients["dha"]
+    )
+    nutrients["omega_6"] = (
+        nutrients["linoleic_acid"] + nutrients["arachidonic_acid"]
+    )
+    return {
+        "name": name.title() if name.isupper() else name,
+        "barcode": re.sub(r"\D", "", str(food.get("gtinUpc") or "")),
+        "brand": str(food.get("brandName") or food.get("brandOwner") or "").strip(),
+        "quantity": " ".join(
+            str(value)
+            for value in (food.get("servingSize"), food.get("servingSizeUnit"))
+            if value
+        ),
+        "image_url": "",
+        "source": f"USDA FoodData Central - {food.get('dataType', 'Food')}",
+        "source_url": (
+            f"https://fdc.nal.usda.gov/fdc-app.html#/food-details/{fdc_id}/nutrients"
+        ),
+        "serving_name": "100 g",
+        "nutrients": nutrients,
+        "fdc_id": str(fdc_id),
+    }
+
+
+def local_network_ip() -> str:
+    connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        connection.connect(("8.8.8.8", 80))
+        return str(connection.getsockname()[0])
+    except OSError:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except OSError:
+            return "127.0.0.1"
+    finally:
+        connection.close()
+
+
+def fetch_usda_foods(
+    query: str, api_key: str, page_size: int = 15, branded_only: bool = False
+) -> list[dict]:
+    def search(data_types: list[str], size: int) -> list[dict]:
+        request = Request(
+            f"{USDA_FDC_BASE}/foods/search?{urlencode({'api_key': api_key})}",
+            data=json.dumps(
+                {
+                    "query": query,
+                    "pageSize": size,
+                    "dataType": data_types,
+                }
+            ).encode("utf-8"),
+            headers={
+                "User-Agent": "Habitline/2.0 (local nutrition tracker)",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return [
+            product
+            for raw in payload.get("foods", [])
+            if (product := usda_food_product(raw))
+        ]
+
+    try:
+        if branded_only:
+            return search(["Branded"], page_size)
+        common_size = max(8, page_size // 2 + 1)
+        common = search(
+            ["Foundation", "SR Legacy", "Survey (FNDDS)"], common_size
+        )
+        branded = search(["Branded"], max(5, page_size - len(common)))
+        return (common + branded)[:page_size]
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ValueError(
+            "USDA FoodData Central could not be reached. Check the API key and internet connection."
+        ) from error
+
+
+class HabitStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.habits: list[dict] = []
+        self.exercises: list[dict] = []
+        self.workouts: list[dict] = []
+        self.workout_days: list[dict] = []
+        self.foods: list[dict] = []
+        self.food_entries: list[dict] = []
+        self.nutrition_goals: dict = dict(DEFAULT_NUTRITION_GOALS)
+        self.body_entries: list[dict] = []
+        self.recovery_entries: list[dict] = []
+        self.meals: list[dict] = []
+        self.planner_events: list[dict] = []
+        self.shopping_items: list[dict] = []
+        self.journal_entries: list[dict] = []
+        self.goals: list[dict] = []
+        self.kickboxing_sessions: list[dict] = []
+        self.trash: list[dict] = []
+        self.weekly_schedule: list[dict] = json.loads(
+            json.dumps(DEFAULT_WEEKLY_SCHEDULE)
+        )
+        self.settings: dict = default_settings()
+        self.load()
+
+    def load(self) -> None:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            self.habits = data.get("habits", [])
+            self.exercises = data.get("exercises", [])
+            self.workouts = data.get("workouts", [])
+            self.workout_days = data.get("workout_days", [])
+            self.foods = data.get("foods", [])
+            self.food_entries = data.get("food_entries", [])
+            self.body_entries = data.get("body_entries", [])
+            self.recovery_entries = data.get("recovery_entries", [])
+            self.meals = data.get("meals", [])
+            self.planner_events = data.get("planner_events", [])
+            self.shopping_items = data.get("shopping_items", [])
+            self.journal_entries = data.get("journal_entries", [])
+            self.goals = data.get("goals", [])
+            self.kickboxing_sessions = data.get("kickboxing_sessions", [])
+            self.trash = data.get("trash", [])
+            self.weekly_schedule = data.get(
+                "weekly_schedule", json.loads(json.dumps(DEFAULT_WEEKLY_SCHEDULE))
+            )
+            original_schedule_count = len(self.weekly_schedule)
+            self.weekly_schedule = [
+                item
+                for item in self.weekly_schedule
+                if not str(item.get("id", "")).startswith("schedule_steps_")
+                and str(item.get("title", "")).strip().lower() not in {
+                    "20k steps",
+                    "20,000 steps",
+                }
+            ]
+            loaded_settings = data.get("settings", {})
+            loaded_profile = loaded_settings.get("profile", {})
+            loaded_rewards = dict(loaded_settings.get("xp_rewards", {}))
+            if not loaded_rewards:
+                loaded_rewards = dict(loaded_profile.get("xp_rewards", {}))
+            loaded_rewards = {
+                key: value
+                for key, value in loaded_rewards.items()
+                if key in DEFAULT_XP_REWARDS
+            }
+            loaded_offset = loaded_settings.get(
+                "xp_offset", loaded_profile.get("xp_offset", 0)
+            )
+            self.settings = {
+                **default_settings(),
+                **loaded_settings,
+                "profile": {
+                    **default_settings()["profile"],
+                    **loaded_profile,
+                },
+                "xp_rewards": {
+                    **DEFAULT_XP_REWARDS,
+                    **loaded_rewards,
+                },
+                "xp_offset": max(0, int(loaded_offset or 0)),
+                "xp_balance": max(0, int(loaded_settings.get("xp_balance", 0) or 0)),
+                "xp_awards": (
+                    loaded_settings.get("xp_awards", {})
+                    if isinstance(loaded_settings.get("xp_awards", {}), dict)
+                    else {}
+                ),
+            }
+            if "xp_rewards" in loaded_profile:
+                self.settings["profile"]["xp_rewards"] = {
+                    **DEFAULT_XP_REWARDS,
+                    **loaded_rewards,
+                }
+            if "xp_balance" not in loaded_settings:
+                self.settings["xp_balance"] = max(
+                    0, self._legacy_raw_xp() - self.settings["xp_offset"]
+                )
+                self.settings["xp_awards"] = self._legacy_award_markers()
+            zero_awards_cleared = False
+            if (
+                "xp_balance" in loaded_settings
+                and self.settings["xp_balance"] == 0
+                and self.settings["xp_awards"]
+                and all(
+                    int(award.get("amount", 0) or 0) == 0
+                    for award in self.settings["xp_awards"].values()
+                    if isinstance(award, dict)
+                )
+            ):
+                self.settings["xp_awards"] = {}
+                zero_awards_cleared = True
+            schema_changed = any(
+                key not in data
+                for key in (
+                    "workout_days",
+                    "foods",
+                    "food_entries",
+                    "nutrition_goals",
+                    "body_entries",
+                    "recovery_entries",
+                    "meals",
+                    "planner_events",
+                    "shopping_items",
+                    "journal_entries",
+                    "goals",
+                    "kickboxing_sessions",
+                    "trash",
+                    "weekly_schedule",
+                    "settings",
+                )
+            ) or any(
+                key not in loaded_settings
+                for key in ("xp_rewards", "xp_offset", "xp_balance", "xp_awards")
+            ) or len(self.weekly_schedule) != original_schedule_count or zero_awards_cleared
+            self.nutrition_goals = {
+                **DEFAULT_NUTRITION_GOALS,
+                **data.get("nutrition_goals", {}),
+            }
+            if not self.foods:
+                self.foods = json.loads(json.dumps(DEFAULT_FOODS))
+                self.save()
+            else:
+                changed = schema_changed
+                defaults_by_id = {food["id"]: food for food in DEFAULT_FOODS}
+                existing_ids = {food.get("id") for food in self.foods}
+                for default_food in DEFAULT_FOODS:
+                    if default_food["id"] not in existing_ids:
+                        self.foods.append(json.loads(json.dumps(default_food)))
+                        changed = True
+                for food in self.foods:
+                    nutrients = food.setdefault("nutrients", {})
+                    default_nutrients = defaults_by_id.get(food.get("id"), {}).get(
+                        "nutrients", {}
+                    )
+                    for key in NUTRIENT_KEYS:
+                        if key not in nutrients:
+                            nutrients[key] = default_nutrients.get(key, 0)
+                            changed = True
+                if changed:
+                    self.save()
+        except FileNotFoundError:
+            self.habits = [
+                {
+                    "id": uuid.uuid4().hex,
+                    "name": "Walk 20k steps",
+                    "type": "number",
+                    "target": 20_000,
+                    "unit": "steps",
+                    "color": DEFAULT_COLORS[0],
+                    "entries": {},
+                }
+            ]
+            self.exercises = []
+            self.workouts = []
+            self.workout_days = []
+            self.foods = json.loads(json.dumps(DEFAULT_FOODS))
+            self.food_entries = []
+            self.nutrition_goals = dict(DEFAULT_NUTRITION_GOALS)
+            self.body_entries = []
+            self.recovery_entries = []
+            self.meals = []
+            self.planner_events = []
+            self.shopping_items = []
+            self.journal_entries = []
+            self.goals = []
+            self.kickboxing_sessions = []
+            self.trash = []
+            self.weekly_schedule = json.loads(json.dumps(DEFAULT_WEEKLY_SCHEDULE))
+            self.settings = default_settings()
+            self.save()
+        except (json.JSONDecodeError, OSError, TypeError):
+            self.habits = []
+            self.exercises = []
+            self.workouts = []
+            self.workout_days = []
+            self.foods = json.loads(json.dumps(DEFAULT_FOODS))
+            self.food_entries = []
+            self.nutrition_goals = dict(DEFAULT_NUTRITION_GOALS)
+            self.body_entries = []
+            self.recovery_entries = []
+            self.meals = []
+            self.planner_events = []
+            self.shopping_items = []
+            self.journal_entries = []
+            self.goals = []
+            self.kickboxing_sessions = []
+            self.trash = []
+            self.weekly_schedule = json.loads(json.dumps(DEFAULT_WEEKLY_SCHEDULE))
+            self.settings = default_settings()
+
+    def _habit_met(self, habit: dict, value) -> bool:
+        if habit.get("type") == "check":
+            return bool(value)
+        try:
+            return float(value or 0) >= float(habit.get("target", 0))
+        except (TypeError, ValueError):
+            return False
+
+    def _workout_reward_key(self, workout: dict) -> str:
+        exercise_rows = sorted(
+            (
+                (position, item)
+                for position, item in enumerate(self.workouts)
+                if item.get("exercise_id") == workout.get("exercise_id")
+            ),
+            key=lambda row: (row[1].get("date", ""), row[0]),
+        )
+        index = next(
+            (
+                position
+                for position, (_, item) in enumerate(exercise_rows)
+                if item["id"] == workout["id"]
+            ),
+            0,
+        )
+        if index == 0:
+            return "workout_first"
+        previous = exercise_rows[index - 1][1]
+        if any(
+            float(workout.get(key, 0)) > float(previous.get(key, 0))
+            for key in ("weight", "sets", "reps")
+        ):
+            return "workout_improvement"
+        return "workout_standard"
+
+    def _legacy_raw_xp(self) -> int:
+        rewards = self.settings.get("xp_rewards", DEFAULT_XP_REWARDS)
+        total = 0
+        for habit in self.habits:
+            total += sum(
+                int(rewards.get("habit", 0))
+                for value in habit.get("entries", {}).values()
+                if self._habit_met(habit, value)
+            )
+        for workout in self.workouts:
+            total += int(rewards.get(self._workout_reward_key(workout), 0))
+        total += len(self.journal_entries) * int(rewards.get("journal", 0))
+        total += sum(
+            int(rewards.get("goal", 0))
+            for goal in self.goals
+            if goal.get("completed")
+        )
+        total += sum(
+            kickboxing_grade_xp(item.get("belt", "")) * int(item.get("attempts", 1))
+            for item in self.kickboxing_sessions
+            if item.get("mode") == "audio-drill"
+        )
+        return total
+
+    def _legacy_award_markers(self) -> dict:
+        markers: dict[str, dict] = {}
+        for habit in self.habits:
+            for day, value in habit.get("entries", {}).items():
+                if self._habit_met(habit, value):
+                    markers[f"habit:{habit['id']}:{day}"] = {
+                        "amount": 0,
+                        "active": True,
+                    }
+        for workout in self.workouts:
+            markers[f"workout:{workout['id']}"] = {"amount": 0, "active": True}
+        for entry in self.journal_entries:
+            markers[f"journal:{entry['id']}"] = {"amount": 0, "active": True}
+        for goal in self.goals:
+            if goal.get("completed"):
+                markers[f"goal:{goal['id']}"] = {"amount": 0, "active": True}
+        for session in self.kickboxing_sessions:
+            if session.get("mode") == "audio-drill":
+                markers[f"kickboxing:{session['id']}"] = {
+                    "amount": 0,
+                    "active": True,
+                }
+        return markers
+
+    def set_xp_award(self, key: str, amount: int, active: bool = True) -> int:
+        amount = max(0, int(amount))
+        awards = self.settings.setdefault("xp_awards", {})
+        current = awards.get(key)
+        before = int(current.get("amount", 0)) if current and current.get("active") else 0
+        if current is None:
+            current = {"amount": amount, "active": bool(active)}
+            awards[key] = current
+        else:
+            current["active"] = bool(active)
+            current["amount"] = amount
+        after = int(current.get("amount", 0)) if current.get("active") else 0
+        change = after - before
+        self.settings["xp_balance"] = max(
+            0, int(self.settings.get("xp_balance", 0)) + change
+        )
+        self.save()
+        return change
+
+    def revoke_xp_prefix(self, prefix: str) -> int:
+        change = 0
+        for key, award in self.settings.setdefault("xp_awards", {}).items():
+            if key.startswith(prefix) and award.get("active"):
+                change -= int(award.get("amount", 0))
+                award["active"] = False
+        self.settings["xp_balance"] = max(
+            0, int(self.settings.get("xp_balance", 0)) + change
+        )
+        self.save()
+        return change
+
+    def reset_xp(self) -> None:
+        self.settings["xp_balance"] = 0
+        self.settings["xp_awards"] = {}
+        self.save()
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "habits": self.habits,
+                    "exercises": self.exercises,
+                    "workouts": self.workouts,
+                    "workout_days": self.workout_days,
+                    "foods": self.foods,
+                    "food_entries": self.food_entries,
+                    "nutrition_goals": self.nutrition_goals,
+                    "body_entries": self.body_entries,
+                    "recovery_entries": self.recovery_entries,
+                    "meals": self.meals,
+                    "planner_events": self.planner_events,
+                    "shopping_items": self.shopping_items,
+                    "journal_entries": self.journal_entries,
+                    "goals": self.goals,
+                    "kickboxing_sessions": self.kickboxing_sessions,
+                    "trash": self.trash,
+                    "weekly_schedule": self.weekly_schedule,
+                    "settings": self.settings,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(self.path)
+
+    def add(self, habit: dict) -> None:
+        with self.lock:
+            self.habits.append(habit)
+            self.save()
+
+    def delete(self, habit_id: str) -> bool:
+        with self.lock:
+            before = len(self.habits)
+            self.habits = [habit for habit in self.habits if habit["id"] != habit_id]
+            if len(self.habits) != before:
+                self.save()
+                return True
+            return False
+
+    def get(self, habit_id: str) -> dict | None:
+        return next((habit for habit in self.habits if habit["id"] == habit_id), None)
+
+    def update(self, habit_id: str, changes: dict) -> dict | None:
+        with self.lock:
+            habit = self.get(habit_id)
+            if not habit:
+                return None
+            habit.update(changes)
+            self.save()
+            return habit
+
+    def set_entry(self, habit_id: str, day: str, value) -> dict | None:
+        with self.lock:
+            habit = self.get(habit_id)
+            if not habit:
+                return None
+            if value is None:
+                habit["entries"].pop(day, None)
+            else:
+                habit["entries"][day] = value
+            self.save()
+            return habit
+
+    def get_exercise(self, exercise_id: str) -> dict | None:
+        return next(
+            (exercise for exercise in self.exercises if exercise["id"] == exercise_id),
+            None,
+        )
+
+    def add_exercise(self, exercise: dict) -> None:
+        with self.lock:
+            self.exercises.append(exercise)
+            self.save()
+
+    def update_exercise(self, exercise_id: str, changes: dict) -> dict | None:
+        with self.lock:
+            exercise = self.get_exercise(exercise_id)
+            if not exercise:
+                return None
+            exercise.update(changes)
+            self.save()
+            return exercise
+
+    def delete_exercise(self, exercise_id: str) -> bool:
+        with self.lock:
+            before = len(self.exercises)
+            self.exercises = [
+                exercise
+                for exercise in self.exercises
+                if exercise["id"] != exercise_id
+            ]
+            if len(self.exercises) == before:
+                return False
+            self.workouts = [
+                workout
+                for workout in self.workouts
+                if workout["exercise_id"] != exercise_id
+            ]
+            for workout_day in self.workout_days:
+                workout_day["exercise_ids"] = [
+                    saved_id
+                    for saved_id in workout_day.get("exercise_ids", [])
+                    if saved_id != exercise_id
+                ]
+            self.save()
+            return True
+
+    def get_workout(self, workout_id: str) -> dict | None:
+        return next(
+            (workout for workout in self.workouts if workout["id"] == workout_id),
+            None,
+        )
+
+    def add_workout(self, workout: dict) -> None:
+        with self.lock:
+            self.workouts.append(workout)
+            self.save()
+
+    def update_workout(self, workout_id: str, changes: dict) -> dict | None:
+        with self.lock:
+            workout = self.get_workout(workout_id)
+            if not workout:
+                return None
+            workout.update(changes)
+            self.save()
+            return workout
+
+    def delete_workout(self, workout_id: str) -> bool:
+        with self.lock:
+            before = len(self.workouts)
+            self.workouts = [
+                workout for workout in self.workouts if workout["id"] != workout_id
+            ]
+            if len(self.workouts) == before:
+                return False
+            self.save()
+            return True
+
+    def get_workout_day(self, workout_day_id: str) -> dict | None:
+        return next(
+            (
+                workout_day
+                for workout_day in self.workout_days
+                if workout_day["id"] == workout_day_id
+            ),
+            None,
+        )
+
+    def add_workout_day(self, workout_day: dict) -> None:
+        with self.lock:
+            self.workout_days.append(workout_day)
+            self.save()
+
+    def update_workout_day(
+        self, workout_day_id: str, changes: dict
+    ) -> dict | None:
+        with self.lock:
+            workout_day = self.get_workout_day(workout_day_id)
+            if not workout_day:
+                return None
+            workout_day.update(changes)
+            self.save()
+            return workout_day
+
+    def delete_workout_day(self, workout_day_id: str) -> bool:
+        with self.lock:
+            before = len(self.workout_days)
+            self.workout_days = [
+                workout_day
+                for workout_day in self.workout_days
+                if workout_day["id"] != workout_day_id
+            ]
+            if len(self.workout_days) == before:
+                return False
+            self.save()
+            return True
+
+    def get_food(self, food_id: str) -> dict | None:
+        return next((food for food in self.foods if food["id"] == food_id), None)
+
+    def add_food(self, food: dict) -> None:
+        with self.lock:
+            self.foods.append(food)
+            self.save()
+
+    def update_food(self, food_id: str, changes: dict) -> dict | None:
+        with self.lock:
+            food = self.get_food(food_id)
+            if not food:
+                return None
+            food.update(changes)
+            self.save()
+            return food
+
+    def delete_food(self, food_id: str) -> bool:
+        with self.lock:
+            before = len(self.foods)
+            self.foods = [food for food in self.foods if food["id"] != food_id]
+            if len(self.foods) == before:
+                return False
+            self.food_entries = [
+                entry for entry in self.food_entries if entry["food_id"] != food_id
+            ]
+            self.save()
+            return True
+
+    def get_food_entry(self, entry_id: str) -> dict | None:
+        return next(
+            (entry for entry in self.food_entries if entry["id"] == entry_id), None
+        )
+
+    def add_food_entry(self, entry: dict) -> None:
+        with self.lock:
+            self.food_entries.append(entry)
+            self.save()
+
+    def update_food_entry(self, entry_id: str, changes: dict) -> dict | None:
+        with self.lock:
+            entry = self.get_food_entry(entry_id)
+            if not entry:
+                return None
+            entry.update(changes)
+            self.save()
+            return entry
+
+    def delete_food_entry(self, entry_id: str) -> bool:
+        with self.lock:
+            before = len(self.food_entries)
+            self.food_entries = [
+                entry for entry in self.food_entries if entry["id"] != entry_id
+            ]
+            if len(self.food_entries) == before:
+                return False
+            self.save()
+            return True
+
+    def update_nutrition_goals(self, goals: dict) -> dict:
+        with self.lock:
+            self.nutrition_goals = goals
+            self.save()
+            return self.nutrition_goals
+
+    def all_data(self, include_trash: bool = True) -> dict:
+        payload = {
+            "app_version": APP_VERSION,
+            "habits": self.habits,
+            "exercises": self.exercises,
+            "workouts": self.workouts,
+            "workout_days": self.workout_days,
+            "foods": self.foods,
+            "food_entries": self.food_entries,
+            "nutrition_goals": self.nutrition_goals,
+            "body_entries": self.body_entries,
+            "recovery_entries": self.recovery_entries,
+            "meals": self.meals,
+            "planner_events": self.planner_events,
+            "shopping_items": self.shopping_items,
+            "journal_entries": self.journal_entries,
+            "goals": self.goals,
+            "kickboxing_sessions": self.kickboxing_sessions,
+            "weekly_schedule": self.weekly_schedule,
+            "settings": self.settings,
+        }
+        if include_trash:
+            payload["trash"] = self.trash
+        return payload
+
+    def collection(self, name: str) -> list[dict]:
+        allowed = {
+            "body_entries",
+            "recovery_entries",
+            "meals",
+            "planner_events",
+            "shopping_items",
+            "journal_entries",
+            "goals",
+            "kickboxing_sessions",
+            "weekly_schedule",
+        }
+        if name not in allowed:
+            raise ValueError("Unknown collection.")
+        return getattr(self, name)
+
+    def add_item(self, collection: str, item: dict) -> dict:
+        with self.lock:
+            self.collection(collection).append(item)
+            self.save()
+            return item
+
+    def update_item(self, collection: str, item_id: str, changes: dict) -> dict | None:
+        with self.lock:
+            item = next(
+                (row for row in self.collection(collection) if row["id"] == item_id),
+                None,
+            )
+            if not item:
+                return None
+            item.update(changes)
+            self.save()
+            return item
+
+    def delete_item(self, collection: str, item_id: str) -> bool:
+        with self.lock:
+            rows = self.collection(collection)
+            item = next((row for row in rows if row["id"] == item_id), None)
+            if not item:
+                return False
+            setattr(
+                self,
+                collection,
+                [row for row in rows if row["id"] != item_id],
+            )
+            self.trash.append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "collection": collection,
+                    "item": item,
+                    "deleted_at": time.time(),
+                }
+            )
+            self.trash = self.trash[-30:]
+            self.save()
+            return True
+
+    def restore_item(self, trash_id: str) -> dict | None:
+        with self.lock:
+            deleted = next(
+                (row for row in self.trash if row["id"] == trash_id), None
+            )
+            if not deleted:
+                return None
+            collection = self.collection(deleted["collection"])
+            item = deleted["item"]
+            if not any(row["id"] == item["id"] for row in collection):
+                collection.append(item)
+            self.trash = [row for row in self.trash if row["id"] != trash_id]
+            self.save()
+            return item
+
+    def import_data(self, payload: dict) -> None:
+        required = {"habits", "exercises", "workouts"}
+        if not required.issubset(payload):
+            raise ValueError("This is not a valid Habitline backup.")
+        with self.lock:
+            for key in (
+                "habits",
+                "exercises",
+                "workouts",
+                "workout_days",
+                "foods",
+                "food_entries",
+                "body_entries",
+                "recovery_entries",
+                "meals",
+                "planner_events",
+                "shopping_items",
+                "journal_entries",
+                "goals",
+                "kickboxing_sessions",
+                "trash",
+                "weekly_schedule",
+            ):
+                if key in payload and isinstance(payload[key], list):
+                    setattr(self, key, payload[key])
+            if isinstance(payload.get("nutrition_goals"), dict):
+                self.nutrition_goals = {
+                    **DEFAULT_NUTRITION_GOALS,
+                    **payload["nutrition_goals"],
+                }
+            if isinstance(payload.get("settings"), dict):
+                imported_settings = payload["settings"]
+                imported_profile = imported_settings.get("profile", {})
+                imported_rewards = dict(imported_settings.get("xp_rewards", {}))
+                if not imported_rewards:
+                    imported_rewards = dict(imported_profile.get("xp_rewards", {}))
+                imported_rewards = {
+                    key: value
+                    for key, value in imported_rewards.items()
+                    if key in DEFAULT_XP_REWARDS
+                }
+                self.settings = {
+                    **default_settings(),
+                    **imported_settings,
+                    "profile": {
+                        **default_settings()["profile"],
+                        **imported_profile,
+                    },
+                    "xp_rewards": {
+                        **DEFAULT_XP_REWARDS,
+                        **imported_rewards,
+                    },
+                    "xp_offset": max(
+                        0,
+                        int(
+                            imported_settings.get(
+                                "xp_offset", imported_profile.get("xp_offset", 0)
+                            )
+                            or 0
+                        ),
+                    ),
+                }
+                if "xp_rewards" in imported_profile:
+                    self.settings["profile"]["xp_rewards"] = {
+                        **DEFAULT_XP_REWARDS,
+                        **imported_rewards,
+                    }
+                if "xp_balance" not in imported_settings:
+                    self.settings["xp_balance"] = max(
+                        0, self._legacy_raw_xp() - self.settings["xp_offset"]
+                    )
+                    self.settings["xp_awards"] = self._legacy_award_markers()
+            self.weekly_schedule = [
+                item
+                for item in self.weekly_schedule
+                if not str(item.get("id", "")).startswith("schedule_steps_")
+                and str(item.get("title", "")).strip().lower()
+                not in {"20k steps", "20,000 steps"}
+            ]
+            self.save()
+
+    def update_settings(self, changes: dict) -> dict:
+        with self.lock:
+            profile = changes.get("profile")
+            if isinstance(profile, dict):
+                self.settings["profile"] = {
+                    **self.settings.get("profile", {}),
+                    **profile,
+                }
+            if "usda_api_key" in changes:
+                key = str(changes["usda_api_key"]).strip()
+                self.settings["usda_api_key"] = key or "DEMO_KEY"
+            rewards = changes.get("xp_rewards")
+            if isinstance(rewards, dict):
+                validated = {}
+                for name, default in DEFAULT_XP_REWARDS.items():
+                    try:
+                        value = int(rewards.get(name, self.settings["xp_rewards"].get(name, default)))
+                    except (TypeError, ValueError) as error:
+                        raise ValueError("XP rewards must be whole numbers.") from error
+                    if value < 0 or value > 10000:
+                        raise ValueError("XP rewards must be between 0 and 10,000.")
+                    validated[name] = value
+                self.settings["xp_rewards"] = validated
+            if "xp_offset" in changes:
+                try:
+                    offset = int(changes["xp_offset"])
+                except (TypeError, ValueError) as error:
+                    raise ValueError("XP reset value must be a whole number.") from error
+                self.settings["xp_offset"] = max(0, offset)
+            if changes.get("reset_xp"):
+                self.settings["xp_balance"] = 0
+                self.settings["xp_awards"] = {}
+            self.save()
+            return self.settings
+
+
+def validate_workout(body: dict, store: HabitStore) -> dict:
+    exercise_id = str(body.get("exercise_id", ""))
+    if not store.get_exercise(exercise_id):
+        raise ValueError("Choose an exercise.")
+    workout_date = str(body.get("date", ""))
+    try:
+        date.fromisoformat(workout_date)
+    except ValueError as error:
+        raise ValueError("Choose a valid workout date.") from error
+    weight = parse_number(body.get("weight", 0))
+    sets = int(body.get("sets", 0))
+    reps = int(body.get("reps", 0))
+    if sets <= 0 or reps <= 0:
+        raise ValueError("Sets and reps must be greater than zero.")
+    return {
+        "exercise_id": exercise_id,
+        "date": workout_date,
+        "weight": weight,
+        "sets": sets,
+        "reps": reps,
+        "notes": str(body.get("notes", "")).strip(),
+    }
+
+
+def validate_workout_day(body: dict, store: HabitStore) -> dict:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise ValueError("Give this workout day a name.")
+    exercise_ids = []
+    for exercise_id in body.get("exercise_ids", []):
+        exercise_id = str(exercise_id)
+        if store.get_exercise(exercise_id) and exercise_id not in exercise_ids:
+            exercise_ids.append(exercise_id)
+    if not exercise_ids:
+        raise ValueError("Add at least one exercise to this workout day.")
+    return {"name": name, "exercise_ids": exercise_ids}
+
+
+def validate_workout_day_log(body: dict, store: HabitStore) -> tuple[str, list[dict]]:
+    workout_day_id = str(body.get("workout_day_id", ""))
+    workout_day = store.get_workout_day(workout_day_id)
+    if not workout_day:
+        raise ValueError("Workout day not found.")
+    workout_date = str(body.get("date", ""))
+    try:
+        date.fromisoformat(workout_date)
+    except ValueError as error:
+        raise ValueError("Choose a valid workout date.") from error
+    rows = []
+    allowed = set(workout_day["exercise_ids"])
+    for row in body.get("exercises", []):
+        if str(row.get("exercise_id", "")) not in allowed:
+            continue
+        rows.append(
+            validate_workout(
+                {**row, "date": workout_date},
+                store,
+            )
+        )
+    if not rows:
+        raise ValueError("Add values for at least one exercise.")
+    return workout_day_id, rows
+
+
+def validate_food(body: dict) -> dict:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise ValueError("Give this food a name.")
+    nutrients = {}
+    supplied = body.get("nutrients", {})
+    for key in NUTRIENT_KEYS:
+        nutrients[key] = parse_number(supplied.get(key, 0))
+    return {
+        "name": name,
+        "serving_name": "100 g",
+        "nutrients": nutrients,
+        "barcode": re.sub(r"\D", "", str(body.get("barcode", ""))),
+        "brand": str(body.get("brand", "")).strip(),
+        "quantity": str(body.get("quantity", "")).strip(),
+        "image_url": str(body.get("image_url", "")).strip(),
+        "source": str(body.get("source", "")).strip(),
+        "source_url": str(body.get("source_url", "")).strip(),
+    }
+
+
+def validate_food_entry(body: dict, store: HabitStore) -> dict:
+    food_id = str(body.get("food_id", ""))
+    if not store.get_food(food_id):
+        raise ValueError("Choose a food.")
+    entry_date = str(body.get("date", ""))
+    try:
+        date.fromisoformat(entry_date)
+    except ValueError as error:
+        raise ValueError("Choose a valid food date.") from error
+    amount_g = parse_number(body.get("amount_g", 0))
+    if amount_g <= 0:
+        raise ValueError("The food amount must be greater than zero.")
+    return {
+        "food_id": food_id,
+        "date": entry_date,
+        "amount_g": amount_g,
+    }
+
+
+def validate_nutrition_goals(body: dict) -> dict:
+    goals = {}
+    for key in NUTRIENT_KEYS:
+        goals[key] = parse_number(body.get(key, DEFAULT_NUTRITION_GOALS[key]))
+    return goals
+
+
+def valid_date(value, message: str = "Choose a valid date.") -> str:
+    result = str(value or "")
+    try:
+        date.fromisoformat(result)
+    except ValueError as error:
+        raise ValueError(message) from error
+    return result
+
+
+def validate_body_entry(body: dict) -> dict:
+    result = {
+        "date": valid_date(body.get("date")),
+        "weight": parse_number(body.get("weight", 0)),
+        "body_fat": parse_number(body.get("body_fat", 0)),
+        "waist": parse_number(body.get("waist", 0)),
+        "chest": parse_number(body.get("chest", 0)),
+        "hips": parse_number(body.get("hips", 0)),
+        "arm": parse_number(body.get("arm", 0)),
+        "note": str(body.get("note", "")).strip(),
+        "photo": str(body.get("photo", "")),
+    }
+    if result["weight"] <= 0:
+        raise ValueError("Weight must be greater than zero.")
+    if len(result["photo"]) > 4_000_000:
+        raise ValueError("That progress photo is too large.")
+    return result
+
+
+def validate_recovery_entry(body: dict) -> dict:
+    result = {
+        "date": valid_date(body.get("date")),
+        "sleep_hours": parse_number(body.get("sleep_hours", 0)),
+        "sleep_quality": int(body.get("sleep_quality", 0)),
+        "energy": int(body.get("energy", 0)),
+        "soreness": int(body.get("soreness", 0)),
+        "stress": int(body.get("stress", 0)),
+        "mood": int(body.get("mood", 0)),
+        "note": str(body.get("note", "")).strip(),
+    }
+    if result["sleep_hours"] > 24:
+        raise ValueError("Sleep hours must be between 0 and 24.")
+    for key in ("sleep_quality", "energy", "soreness", "stress", "mood"):
+        if result[key] < 1 or result[key] > 5:
+            raise ValueError("Recovery ratings must be from 1 to 5.")
+    return result
+
+
+def validate_meal(body: dict, store: HabitStore) -> dict:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise ValueError("Give this meal or recipe a name.")
+    items = []
+    for row in body.get("items", []):
+        food_id = str(row.get("food_id", ""))
+        amount_g = parse_number(row.get("amount_g", 0))
+        if store.get_food(food_id) and amount_g > 0:
+            items.append({"food_id": food_id, "amount_g": amount_g})
+    if not items:
+        raise ValueError("Add at least one food to this meal.")
+    return {
+        "name": name,
+        "items": items,
+        "servings": max(1, int(body.get("servings", 1))),
+        "instructions": str(body.get("instructions", "")).strip(),
+    }
+
+
+def validate_planner_event(body: dict) -> dict:
+    event_type = str(body.get("type", "note"))
+    if event_type not in ("workout", "meal", "habit", "note"):
+        raise ValueError("Choose a valid planner type.")
+    title = str(body.get("title", "")).strip()
+    if not title:
+        raise ValueError("Give this planner item a title.")
+    reminder = str(body.get("reminder", "")).strip()
+    if reminder and not re.fullmatch(r"\d{2}:\d{2}", reminder):
+        raise ValueError("Choose a valid reminder time.")
+    start = str(body.get("start", reminder)).strip()
+    end = str(body.get("end", "")).strip()
+    time_pattern = r"(?:[01]\d|2[0-3]):[0-5]\d"
+    if start and not re.fullmatch(time_pattern, start):
+        raise ValueError("Choose a valid start time.")
+    if end and not re.fullmatch(time_pattern, end):
+        raise ValueError("Choose a valid end time.")
+    if start and end and end <= start:
+        raise ValueError("The end time must be after the start time.")
+    return {
+        "date": valid_date(body.get("date")),
+        "type": event_type,
+        "title": title,
+        "reference_id": str(body.get("reference_id", "")),
+        "reminder": reminder or start,
+        "start": start,
+        "end": end,
+        "done": bool(body.get("done", False)),
+        "note": str(body.get("note", "")).strip(),
+    }
+
+
+def validate_weekly_schedule_item(body: dict) -> dict:
+    title = str(body.get("title", "")).strip()
+    if not title:
+        raise ValueError("Give this repeating activity a title.")
+    try:
+        weekday = int(body.get("weekday", -1))
+    except (TypeError, ValueError) as error:
+        raise ValueError("Choose a day of the week.") from error
+    if weekday < 0 or weekday > 6:
+        raise ValueError("Choose a day of the week.")
+    event_type = str(body.get("type", "note"))
+    if event_type not in ("workout", "meal", "habit", "note"):
+        raise ValueError("Choose a valid activity type.")
+    start = str(body.get("start", "")).strip()
+    end = str(body.get("end", "")).strip()
+    time_pattern = r"(?:[01]\d|2[0-3]):[0-5]\d"
+    if start and not re.fullmatch(time_pattern, start):
+        raise ValueError("Choose a valid start time.")
+    if end and not re.fullmatch(time_pattern, end):
+        raise ValueError("Choose a valid end time.")
+    if end and not start:
+        raise ValueError("Add a start time before the end time.")
+    if start and end and end <= start:
+        raise ValueError("The end time must be after the start time.")
+    color = str(body.get("color", DEFAULT_COLORS[0])).strip()
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        color = DEFAULT_COLORS[0]
+    return {
+        "weekday": weekday,
+        "title": title,
+        "start": start,
+        "end": end,
+        "type": event_type,
+        "color": color,
+    }
+
+
+def validate_shopping_item(body: dict) -> dict:
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise ValueError("Give this shopping item a name.")
+    return {
+        "name": name,
+        "amount": str(body.get("amount", "")).strip(),
+        "checked": bool(body.get("checked", False)),
+    }
+
+
+def validate_journal_entry(body: dict) -> dict:
+    entry_date = valid_date(body.get("date"))
+    title = str(body.get("title", "")).strip() or "Daily reflection"
+    content = str(body.get("content", "")).strip()
+    if not content:
+        raise ValueError("Write something before saving your journal entry.")
+    mood = int(body.get("mood", 3))
+    if mood < 1 or mood > 5:
+        raise ValueError("Mood must be between 1 and 5.")
+    return {
+        "date": entry_date,
+        "title": title[:100],
+        "content": content[:10000],
+        "mood": mood,
+        "gratitude": str(body.get("gratitude", "")).strip()[:1000],
+        "win": str(body.get("win", "")).strip()[:1000],
+    }
+
+
+def validate_goal(body: dict) -> dict:
+    title = str(body.get("title", "")).strip()
+    if not title:
+        raise ValueError("Give this goal a title.")
+    category = str(body.get("category", "personal"))
+    if category not in ("body", "strength", "running", "nutrition", "habit", "personal"):
+        category = "personal"
+    deadline = str(body.get("deadline", "")).strip()
+    if deadline:
+        deadline = valid_date(deadline, "Choose a valid goal deadline.")
+    target_value = parse_number(body.get("target_value", 0))
+    current_value = parse_number(body.get("current_value", 0))
+    return {
+        "title": title[:100],
+        "category": category,
+        "target_value": target_value,
+        "current_value": current_value,
+        "unit": str(body.get("unit", "")).strip()[:30],
+        "deadline": deadline,
+        "completed": bool(body.get("completed", False)),
+        "notes": str(body.get("notes", "")).strip()[:1000],
+    }
+
+
+def validate_kickboxing_session(body: dict) -> dict:
+    score = max(0, int(body.get("score", 0)))
+    attempts = max(1, int(body.get("attempts", 1)))
+    hits = max(0, min(attempts, int(body.get("hits", 0))))
+    belt = str(body.get("belt", "White")).strip()[:30] or "White"
+    return {
+        "date": valid_date(body.get("date")),
+        "score": score,
+        "attempts": attempts,
+        "hits": hits,
+        "accuracy": round(hits / attempts * 100, 1),
+        "belt": belt,
+        "mode": str(body.get("mode", "rhythm")).strip()[:30],
+        "combo": str(body.get("combo", "")).strip()[:300],
+    }
+
+
+class HabitHandler(BaseHTTPRequestHandler):
+    store: HabitStore
+    static_root: Path
+    off_cache: dict[str, tuple[float, dict]] = {}
+
+    def log_message(self, _format: str, *_args) -> None:
+        return
+
+    def _json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    def _touch(self) -> None:
+        self.server.last_seen = time.monotonic()
+
+    def _send_json(self, payload, status: int = 200) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _error(self, message: str, status: int = 400) -> None:
+        self._send_json({"error": message}, status)
+
+    def _open_food_facts(self, url: str) -> dict:
+        cached = self.off_cache.get(url)
+        if cached and time.monotonic() - cached[0] < 600:
+            return cached[1]
+        payload = fetch_open_food_facts(url)
+        self.off_cache[url] = (time.monotonic(), payload)
+        return payload
+
+    def _authorized(self, parsed) -> bool:
+        if self.client_address[0] in ("127.0.0.1", "::1"):
+            return True
+        supplied = self.headers.get("X-Habitline-Token", "")
+        if not supplied:
+            supplied = (parse_qs(parsed.query).get("token") or [""])[0]
+        return supplied == self.store.settings.get("sync_token")
+
+    def _require_api_access(self, parsed) -> bool:
+        if parsed.path.startswith("/api/") and not self._authorized(parsed):
+            self._error("This phone link is missing or no longer valid.", 403)
+            return False
+        return True
+
+    def do_GET(self) -> None:
+        self._touch()
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not self._require_api_access(parsed):
+            return
+        if path == "/api/ping":
+            self.send_response(204)
+            self.end_headers()
+            return
+        if path == "/api/version":
+            self._send_json({"name": APP_NAME, "version": APP_VERSION})
+            return
+        if path == "/api/habits":
+            self._send_json({"habits": self.store.habits})
+            return
+        if path == "/api/data":
+            self._send_json(self.store.all_data())
+            return
+        if path == "/api/sync-info":
+            network_ip = local_network_ip()
+            token = self.store.settings.get("sync_token", "")
+            self._send_json(
+                {
+                    "phone_url": f"http://{network_ip}:{self.server.server_port}/?token={token}",
+                    "network_ip": network_ip,
+                    "port": self.server.server_port,
+                    "requires_same_wifi": True,
+                }
+            )
+            return
+        if path == "/api/export":
+            body = json.dumps(self.store.all_data(), indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="habitline-backup-{date.today().isoformat()}.json"',
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/foods/search":
+            query = (parse_qs(parsed.query).get("q") or [""])[0].strip()
+            if len(query) < 2:
+                self._error("Enter at least two characters to search.")
+                return
+            products = [
+                {
+                    **food,
+                    "local_id": food["id"],
+                    "source": food.get("source") or "Habitline offline food library",
+                    "source_url": food.get("source_url", ""),
+                }
+                for food in search_offline_foods(self.store.foods, query)
+            ]
+            self._send_json(
+                {
+                    "products": products,
+                    "source": "Habitline offline food library",
+                    "offline": True,
+                }
+            )
+            return
+        if path == "/api/usda/search":
+            query = (parse_qs(parsed.query).get("q") or [""])[0].strip()
+            if len(query) < 2:
+                self._error("Enter at least two characters to search.")
+                return
+            try:
+                products = fetch_usda_foods(
+                    query, self.store.settings.get("usda_api_key", "DEMO_KEY")
+                )
+                self._send_json(
+                    {
+                        "products": products,
+                        "source": "USDA FoodData Central",
+                        "source_url": "https://fdc.nal.usda.gov/",
+                    }
+                )
+            except ValueError as error:
+                fallback = [
+                    {
+                        **food,
+                        "local_id": food["id"],
+                        "source": "Habitline offline food library",
+                        "source_url": "",
+                    }
+                    for food in search_offline_foods(self.store.foods, query, 12)
+                ]
+                if fallback:
+                    self._send_json(
+                        {
+                            "products": fallback,
+                            "source": "Habitline built-in foods",
+                            "warning": str(error),
+                        }
+                    )
+                else:
+                    self._error(str(error), 503)
+            return
+        usda_barcode_match = re.fullmatch(r"/api/usda/barcode/(\d{8,14})", path)
+        if usda_barcode_match:
+            barcode = usda_barcode_match.group(1)
+            local = next(
+                (food for food in self.store.foods if food.get("barcode") == barcode),
+                None,
+            )
+            if local:
+                self._send_json(
+                    {
+                        "product": {
+                            **local,
+                            "local_id": local["id"],
+                            "source": local.get("source")
+                            or "Habitline offline food library",
+                        }
+                    }
+                )
+                return
+            try:
+                products = fetch_usda_foods(
+                    barcode,
+                    self.store.settings.get("usda_api_key", "DEMO_KEY"),
+                    25,
+                    branded_only=True,
+                )
+                exact = next(
+                    (product for product in products if product["barcode"] == barcode),
+                    None,
+                )
+                if not exact:
+                    self._error("USDA did not have an exact match for that barcode.", 404)
+                    return
+                self._send_json({"product": exact})
+            except ValueError as error:
+                self._error(str(error), 503)
+            return
+        barcode_match = re.fullmatch(
+            r"/api/open-food-facts/barcode/(\d{8,14})", path
+        )
+        if barcode_match:
+            try:
+                barcode = barcode_match.group(1)
+                fields = urlencode({"fields": OPEN_FOOD_FACTS_FIELDS})
+                payload = self._open_food_facts(
+                    f"{OPEN_FOOD_FACTS_BASE}/api/v2/product/{barcode}.json?{fields}"
+                )
+                product = open_food_facts_product(payload.get("product") or {})
+                if not product:
+                    self._error("No product was found for that barcode.", 404)
+                    return
+                self._send_json({"product": product})
+            except ValueError as error:
+                self._error(str(error), 503)
+            return
+        if path == "/api/open-food-facts/search":
+            query = (parse_qs(parsed.query).get("q") or [""])[0].strip()
+            if len(query) < 2:
+                self._error("Enter at least two characters to search.")
+                return
+            try:
+                parameters = urlencode(
+                    {
+                        "search_terms": query,
+                        "search_simple": 1,
+                        "action": "process",
+                        "json": 1,
+                        "page_size": 12,
+                        "fields": OPEN_FOOD_FACTS_FIELDS,
+                    }
+                )
+                payload = self._open_food_facts(
+                    f"{OPEN_FOOD_FACTS_BASE}/cgi/search.pl?{parameters}"
+                )
+            except ValueError:
+                fallback_parameters = urlencode(
+                    {
+                        "categories_tags_en": query,
+                        "page_size": 12,
+                        "fields": OPEN_FOOD_FACTS_FIELDS,
+                    }
+                )
+                try:
+                    payload = self._open_food_facts(
+                        f"{OPEN_FOOD_FACTS_BASE}/api/v2/search?{fallback_parameters}"
+                    )
+                except ValueError as error:
+                    self._error(str(error), 503)
+                    return
+            try:
+                products = [
+                    product
+                    for raw_product in payload.get("products", [])
+                    if (product := open_food_facts_product(raw_product))
+                ]
+                self._send_json(
+                    {
+                        "products": products,
+                        "source": "Open Food Facts",
+                        "source_url": OPEN_FOOD_FACTS_BASE,
+                    }
+                )
+            except ValueError as error:
+                self._error(str(error), 503)
+            return
+        static_files = {
+            "/": ("index.html", "text/html; charset=utf-8"),
+            "/index.html": ("index.html", "text/html; charset=utf-8"),
+            "/manifest.json": ("manifest.json", "application/manifest+json"),
+            "/service-worker.js": ("service-worker.js", "text/javascript; charset=utf-8"),
+            "/icon-192.png": ("icon-192.png", "image/png"),
+            "/icon-512.png": ("icon-512.png", "image/png"),
+        }
+        if path in static_files:
+            filename, content_type = static_files[path]
+            target = self.static_root / filename
+            if not target.exists():
+                self._error("Not found.", 404)
+                return
+            body = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header(
+                "Cache-Control",
+                "no-store" if filename == "index.html" else "public, max-age=3600",
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+        self._error("Not found.", 404)
+
+    def do_POST(self) -> None:
+        self._touch()
+        parsed = urlparse(self.path)
+        if not self._require_api_access(parsed):
+            return
+        path = parsed.path
+        try:
+            body = self._json_body()
+            if path == "/api/habits":
+                habit_type = body.get("type")
+                name = str(body.get("name", "")).strip()
+                if not name:
+                    raise ValueError("Give this habit a name.")
+                if habit_type not in ("check", "number"):
+                    raise ValueError("Choose checkbox or number goal.")
+                target = (
+                    parse_number(body.get("target", 1))
+                    if habit_type == "number"
+                    else 1
+                )
+                if target <= 0:
+                    raise ValueError("The target must be greater than zero.")
+                habit = {
+                    "id": uuid.uuid4().hex,
+                    "name": name,
+                    "type": habit_type,
+                    "target": target,
+                    "unit": str(body.get("unit", "")).strip()
+                    if habit_type == "number"
+                    else "",
+                    "color": str(body.get("color") or DEFAULT_COLORS[0]),
+                    "entries": {},
+                }
+                self.store.add(habit)
+                self._send_json(habit, 201)
+                return
+            if path == "/api/exercises":
+                name = str(body.get("name", "")).strip()
+                if not name:
+                    raise ValueError("Give this exercise a name.")
+                exercise = {
+                    "id": uuid.uuid4().hex,
+                    "name": name,
+                    "unit": str(body.get("unit", "kg")).strip() or "kg",
+                    "color": str(body.get("color") or DEFAULT_COLORS[0]),
+                    "muscle_group": str(
+                        body.get("muscle_group", "Other")
+                    ).strip()
+                    or "Other",
+                    "secondary_muscles": [
+                        str(value)
+                        for value in body.get("secondary_muscles", [])
+                        if str(value).strip()
+                    ],
+                }
+                self.store.add_exercise(exercise)
+                self._send_json(exercise, 201)
+                return
+            if path == "/api/workouts":
+                workout = {
+                    "id": uuid.uuid4().hex,
+                    **validate_workout(body, self.store),
+                }
+                self.store.add_workout(workout)
+                reward_key = self.store._workout_reward_key(workout)
+                xp_change = self.store.set_xp_award(
+                    f"workout:{workout['id']}",
+                    self.store.settings["xp_rewards"][reward_key],
+                )
+                self._send_json(
+                    {
+                        **workout,
+                        "xp_change": xp_change,
+                        "xp_total": self.store.settings["xp_balance"],
+                        "xp_reward_key": reward_key,
+                    },
+                    201,
+                )
+                return
+            if path == "/api/workout-days":
+                workout_day = {
+                    "id": uuid.uuid4().hex,
+                    **validate_workout_day(body, self.store),
+                }
+                self.store.add_workout_day(workout_day)
+                self._send_json(workout_day, 201)
+                return
+            if path == "/api/workout-day-log":
+                workout_day_id, rows = validate_workout_day_log(body, self.store)
+                session_id = uuid.uuid4().hex
+                workouts = []
+                with self.store.lock:
+                    for row in rows:
+                        workout = {
+                            "id": uuid.uuid4().hex,
+                            **row,
+                            "workout_day_id": workout_day_id,
+                            "session_id": session_id,
+                        }
+                        self.store.workouts.append(workout)
+                        workouts.append(workout)
+                    self.store.save()
+                xp_change = 0
+                for workout in workouts:
+                    reward_key = self.store._workout_reward_key(workout)
+                    xp_change += self.store.set_xp_award(
+                        f"workout:{workout['id']}",
+                        self.store.settings["xp_rewards"][reward_key],
+                    )
+                self._send_json(
+                    {
+                        "session_id": session_id,
+                        "workouts": workouts,
+                        "xp_change": xp_change,
+                        "xp_total": self.store.settings["xp_balance"],
+                        "xp_reward_keys": [
+                            self.store._workout_reward_key(workout)
+                            for workout in workouts
+                        ],
+                    },
+                    201,
+                )
+                return
+            if path == "/api/foods":
+                barcode = re.sub(r"\D", "", str(body.get("barcode", "")))
+                if barcode:
+                    existing = next(
+                        (
+                            food
+                            for food in self.store.foods
+                            if food.get("barcode") == barcode
+                        ),
+                        None,
+                    )
+                    if existing:
+                        self._send_json(existing)
+                        return
+                food = {"id": uuid.uuid4().hex, **validate_food(body)}
+                self.store.add_food(food)
+                self._send_json(food, 201)
+                return
+            if path == "/api/food-entries":
+                entry = {
+                    "id": uuid.uuid4().hex,
+                    **validate_food_entry(body, self.store),
+                }
+                self.store.add_food_entry(entry)
+                self._send_json(entry, 201)
+                return
+            collection_routes = {
+                "/api/body-entries": ("body_entries", validate_body_entry),
+                "/api/recovery-entries": (
+                    "recovery_entries",
+                    validate_recovery_entry,
+                ),
+                "/api/meals": (
+                    "meals",
+                    lambda value: validate_meal(value, self.store),
+                ),
+                "/api/planner-events": ("planner_events", validate_planner_event),
+                "/api/shopping-items": ("shopping_items", validate_shopping_item),
+                "/api/journal-entries": (
+                    "journal_entries",
+                    validate_journal_entry,
+                ),
+                "/api/goals": ("goals", validate_goal),
+                "/api/kickboxing-sessions": (
+                    "kickboxing_sessions",
+                    validate_kickboxing_session,
+                ),
+                "/api/schedule-items": (
+                    "weekly_schedule",
+                    validate_weekly_schedule_item,
+                ),
+            }
+            if path in collection_routes:
+                collection, validator = collection_routes[path]
+                item = {"id": uuid.uuid4().hex, **validator(body)}
+                xp_amount = 0
+                xp_key = ""
+                if path == "/api/journal-entries":
+                    xp_amount = self.store.settings["xp_rewards"]["journal"]
+                    xp_key = f"journal:{item['id']}"
+                elif path == "/api/goals" and item.get("completed"):
+                    xp_amount = self.store.settings["xp_rewards"]["goal"]
+                    xp_key = f"goal:{item['id']}"
+                elif (
+                    path == "/api/kickboxing-sessions"
+                    and item.get("mode") == "audio-drill"
+                ):
+                    xp_amount = kickboxing_grade_xp(item.get("belt", "")) * int(
+                        item.get("attempts", 1)
+                    )
+                    item["xp_awarded"] = xp_amount
+                    xp_key = f"kickboxing:{item['id']}"
+                self.store.add_item(collection, item)
+                xp_change = (
+                    self.store.set_xp_award(xp_key, xp_amount)
+                    if xp_key
+                    else 0
+                )
+                self._send_json(
+                    {
+                        **item,
+                        "xp_change": xp_change,
+                        "xp_total": self.store.settings["xp_balance"],
+                    },
+                    201,
+                )
+                return
+            restore_match = re.fullmatch(r"/api/trash/([a-f0-9]+)/restore", path)
+            if restore_match:
+                item = self.store.restore_item(restore_match.group(1))
+                if not item:
+                    self._error("Deleted item not found.", 404)
+                    return
+                self._send_json(item)
+                return
+            if path == "/api/import":
+                self.store.import_data(body)
+                self._send_json(self.store.all_data())
+                return
+            self._error("Not found.", 404)
+        except (ValueError, TypeError, json.JSONDecodeError) as error:
+            self._error(str(error))
+
+    def do_PUT(self) -> None:
+        self._touch()
+        parsed = urlparse(self.path)
+        if not self._require_api_access(parsed):
+            return
+        path = parsed.path
+        entry_match = re.fullmatch(
+            r"/api/habits/([a-f0-9]+)/entries/(\d{4}-\d{2}-\d{2})", path
+        )
+        habit_match = re.fullmatch(r"/api/habits/([a-f0-9]+)", path)
+        exercise_match = re.fullmatch(r"/api/exercises/([a-f0-9]+)", path)
+        workout_match = re.fullmatch(r"/api/workouts/([a-f0-9]+)", path)
+        workout_day_match = re.fullmatch(r"/api/workout-days/([a-f0-9]+)", path)
+        food_match = re.fullmatch(r"/api/foods/([a-z0-9_]+)", path)
+        food_entry_match = re.fullmatch(r"/api/food-entries/([a-f0-9]+)", path)
+        generic_match = re.fullmatch(
+            r"/api/(body-entries|recovery-entries|meals|planner-events|shopping-items|journal-entries|goals|kickboxing-sessions|schedule-items)/([a-z0-9_]+)",
+            path,
+        )
+        try:
+            body = self._json_body()
+            if path == "/api/nutrition-goals":
+                self._send_json(
+                    self.store.update_nutrition_goals(
+                        validate_nutrition_goals(body)
+                    )
+                )
+                return
+            if path == "/api/settings":
+                profile = body.get("profile", {})
+                if profile:
+                    age = int(profile.get("age", 0) or 0)
+                    if age and not 13 <= age <= 100:
+                        raise ValueError("Age must be between 13 and 100.")
+                    profile["age"] = age
+                    profile["body_weight"] = parse_number(
+                        profile.get("body_weight", 0)
+                    )
+                    profile["weight_unit"] = (
+                        "lb" if profile.get("weight_unit") == "lb" else "kg"
+                    )
+                    profile["height_cm"] = parse_number(
+                        profile.get("height_cm", 0)
+                    )
+                    profile["sex"] = (
+                        "female" if profile.get("sex") == "female" else "male"
+                    )
+                    profile["activity_level"] = (
+                        profile.get("activity_level")
+                        if profile.get("activity_level")
+                        in ("inactive", "low", "active", "very")
+                        else "active"
+                    )
+                    profile["goal_type"] = (
+                        profile.get("goal_type")
+                        if profile.get("goal_type")
+                        in ("lose", "maintain", "recomposition", "gain", "performance")
+                        else "recomposition"
+                    )
+                    profile["training_experience"] = (
+                        profile.get("training_experience")
+                        if profile.get("training_experience")
+                        in ("beginner", "intermediate", "advanced")
+                        else "beginner"
+                    )
+                    profile["auto_nutrition"] = bool(
+                        profile.get("auto_nutrition", True)
+                    )
+                self._send_json(self.store.update_settings(body))
+                return
+            if entry_match:
+                habit_id, day = entry_match.groups()
+                habit = self.store.get(habit_id)
+                if not habit:
+                    self._error("Habit not found.", 404)
+                    return
+                value = body.get("value")
+                if value is not None:
+                    value = bool(value) if habit["type"] == "check" else parse_number(value)
+                updated = self.store.set_entry(habit_id, day, value)
+                xp_change = self.store.set_xp_award(
+                    f"habit:{habit_id}:{day}",
+                    self.store.settings["xp_rewards"]["habit"],
+                    self.store._habit_met(habit, value),
+                )
+                self._send_json(
+                    {
+                        "habit": updated,
+                        "xp_change": xp_change,
+                        "xp_total": self.store.settings["xp_balance"],
+                    }
+                )
+                return
+            if habit_match:
+                habit_id = habit_match.group(1)
+                current = self.store.get(habit_id)
+                if not current:
+                    self._error("Habit not found.", 404)
+                    return
+                habit_type = body.get("type", current["type"])
+                if habit_type not in ("check", "number"):
+                    raise ValueError("Choose checkbox or number goal.")
+                name = str(body.get("name", current["name"])).strip()
+                if not name:
+                    raise ValueError("Give this habit a name.")
+                target = (
+                    parse_number(body.get("target", current["target"]))
+                    if habit_type == "number"
+                    else 1
+                )
+                if target <= 0:
+                    raise ValueError("The target must be greater than zero.")
+                changes = {
+                    "name": name,
+                    "type": habit_type,
+                    "target": target,
+                    "unit": str(body.get("unit", current.get("unit", ""))).strip()
+                    if habit_type == "number"
+                    else "",
+                    "color": str(body.get("color", current["color"])),
+                }
+                if habit_type != current["type"]:
+                    changes["entries"] = {}
+                    self.store.revoke_xp_prefix(f"habit:{habit_id}:")
+                self._send_json(self.store.update(habit_id, changes))
+                return
+            if exercise_match:
+                exercise_id = exercise_match.group(1)
+                current = self.store.get_exercise(exercise_id)
+                if not current:
+                    self._error("Exercise not found.", 404)
+                    return
+                name = str(body.get("name", current["name"])).strip()
+                if not name:
+                    raise ValueError("Give this exercise a name.")
+                changes = {
+                    "name": name,
+                    "unit": str(body.get("unit", current.get("unit", "kg"))).strip()
+                    or "kg",
+                    "color": str(body.get("color", current["color"])),
+                    "muscle_group": str(
+                        body.get("muscle_group", current.get("muscle_group", "Other"))
+                    ).strip()
+                    or "Other",
+                    "secondary_muscles": [
+                        str(value)
+                        for value in body.get(
+                            "secondary_muscles",
+                            current.get("secondary_muscles", []),
+                        )
+                        if str(value).strip()
+                    ],
+                }
+                self._send_json(self.store.update_exercise(exercise_id, changes))
+                return
+            if workout_match:
+                workout_id = workout_match.group(1)
+                current = self.store.get_workout(workout_id)
+                if not current:
+                    self._error("Workout not found.", 404)
+                    return
+                merged = {**current, **body}
+                updated = self.store.update_workout(
+                    workout_id, validate_workout(merged, self.store)
+                )
+                reward_key = self.store._workout_reward_key(updated)
+                xp_change = self.store.set_xp_award(
+                    f"workout:{workout_id}",
+                    self.store.settings["xp_rewards"][reward_key],
+                )
+                self._send_json(
+                    {
+                        **updated,
+                        "xp_change": xp_change,
+                        "xp_total": self.store.settings["xp_balance"],
+                        "xp_reward_key": reward_key,
+                    }
+                )
+                return
+            if workout_day_match:
+                workout_day_id = workout_day_match.group(1)
+                if not self.store.get_workout_day(workout_day_id):
+                    self._error("Workout day not found.", 404)
+                    return
+                self._send_json(
+                    self.store.update_workout_day(
+                        workout_day_id,
+                        validate_workout_day(body, self.store),
+                    )
+                )
+                return
+            if food_match:
+                food_id = food_match.group(1)
+                if not self.store.get_food(food_id):
+                    self._error("Food not found.", 404)
+                    return
+                self._send_json(
+                    self.store.update_food(food_id, validate_food(body))
+                )
+                return
+            if food_entry_match:
+                entry_id = food_entry_match.group(1)
+                current = self.store.get_food_entry(entry_id)
+                if not current:
+                    self._error("Food entry not found.", 404)
+                    return
+                self._send_json(
+                    self.store.update_food_entry(
+                        entry_id,
+                        validate_food_entry({**current, **body}, self.store),
+                    )
+                )
+                return
+            if generic_match:
+                route, item_id = generic_match.groups()
+                configurations = {
+                    "body-entries": ("body_entries", validate_body_entry),
+                    "recovery-entries": (
+                        "recovery_entries",
+                        validate_recovery_entry,
+                    ),
+                    "meals": (
+                        "meals",
+                        lambda value: validate_meal(value, self.store),
+                    ),
+                    "planner-events": (
+                        "planner_events",
+                        validate_planner_event,
+                    ),
+                    "shopping-items": (
+                        "shopping_items",
+                        validate_shopping_item,
+                    ),
+                    "journal-entries": (
+                        "journal_entries",
+                        validate_journal_entry,
+                    ),
+                    "goals": ("goals", validate_goal),
+                    "kickboxing-sessions": (
+                        "kickboxing_sessions",
+                        validate_kickboxing_session,
+                    ),
+                    "schedule-items": (
+                        "weekly_schedule",
+                        validate_weekly_schedule_item,
+                    ),
+                }
+                collection, validator = configurations[route]
+                current = next(
+                    (
+                        row
+                        for row in self.store.collection(collection)
+                        if row["id"] == item_id
+                    ),
+                    None,
+                )
+                if not current:
+                    self._error("Item not found.", 404)
+                    return
+                updated = self.store.update_item(
+                    collection, item_id, validator({**current, **body})
+                )
+                xp_change = 0
+                if route == "goals":
+                    xp_change = self.store.set_xp_award(
+                        f"goal:{item_id}",
+                        self.store.settings["xp_rewards"]["goal"],
+                        bool(updated.get("completed")),
+                    )
+                self._send_json(
+                    {
+                        **updated,
+                        "xp_change": xp_change,
+                        "xp_total": self.store.settings["xp_balance"],
+                    }
+                )
+                return
+            self._error("Not found.", 404)
+        except (ValueError, TypeError, json.JSONDecodeError) as error:
+            self._error(str(error))
+
+    def do_DELETE(self) -> None:
+        self._touch()
+        parsed = urlparse(self.path)
+        if not self._require_api_access(parsed):
+            return
+        path = parsed.path
+        habit_match = re.fullmatch(r"/api/habits/([a-f0-9]+)", path)
+        exercise_match = re.fullmatch(r"/api/exercises/([a-f0-9]+)", path)
+        workout_match = re.fullmatch(r"/api/workouts/([a-f0-9]+)", path)
+        workout_day_match = re.fullmatch(r"/api/workout-days/([a-f0-9]+)", path)
+        food_match = re.fullmatch(r"/api/foods/([a-z0-9_]+)", path)
+        food_entry_match = re.fullmatch(r"/api/food-entries/([a-f0-9]+)", path)
+        generic_match = re.fullmatch(
+            r"/api/(body-entries|recovery-entries|meals|planner-events|shopping-items|journal-entries|goals|kickboxing-sessions|schedule-items)/([a-z0-9_]+)",
+            path,
+        )
+        if habit_match and self.store.get(habit_match.group(1)):
+            habit_id = habit_match.group(1)
+            self.store.revoke_xp_prefix(f"habit:{habit_id}:")
+            self.store.delete(habit_id)
+            self._send_json({"deleted": True})
+            return
+        if exercise_match and self.store.delete_exercise(exercise_match.group(1)):
+            self._send_json({"deleted": True})
+            return
+        if workout_match and self.store.get_workout(workout_match.group(1)):
+            workout_id = workout_match.group(1)
+            self.store.set_xp_award(f"workout:{workout_id}", 0, False)
+            self.store.delete_workout(workout_id)
+            self._send_json({"deleted": True})
+            return
+        if workout_day_match and self.store.delete_workout_day(
+            workout_day_match.group(1)
+        ):
+            self._send_json({"deleted": True})
+            return
+        if food_match and self.store.delete_food(food_match.group(1)):
+            self._send_json({"deleted": True})
+            return
+        if food_entry_match and self.store.delete_food_entry(
+            food_entry_match.group(1)
+        ):
+            self._send_json({"deleted": True})
+            return
+        if generic_match:
+            route, item_id = generic_match.groups()
+            collection = (
+                "weekly_schedule"
+                if route == "schedule-items"
+                else route.replace("-", "_")
+            )
+            current = next(
+                (
+                    item
+                    for item in self.store.collection(collection)
+                    if item.get("id") == item_id
+                ),
+                None,
+            )
+            if current:
+                prefix = {
+                    "journal-entries": "journal:",
+                    "goals": "goal:",
+                    "kickboxing-sessions": "kickboxing:",
+                }.get(route)
+                if prefix:
+                    self.store.set_xp_award(f"{prefix}{item_id}", 0, False)
+            if current and self.store.delete_item(collection, item_id):
+                self._send_json(
+                    {"deleted": True, "trash": self.store.trash[-1]}
+                )
+                return
+        self._error("Item not found.", 404)
+
+
+def run_server(
+    port: int = DEFAULT_PORT,
+    open_browser: bool = True,
+    data_root: Path | None = None,
+) -> None:
+    app_root = Path(__file__).resolve().parent
+    data_root = data_root or app_root / "data"
+    HabitHandler.store = HabitStore(data_root / "habits.json")
+    HabitHandler.static_root = app_root
+
+    occupied_by_other_version = False
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/version", timeout=0.4) as response:
+            running = json.loads(response.read().decode("utf-8"))
+        if running.get("name") == APP_NAME and running.get("version") == APP_VERSION:
+            if open_browser:
+                webbrowser.open(f"http://127.0.0.1:{port}")
+            return
+        occupied_by_other_version = True
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+    server = None
+    selected_port = port
+    first_candidate = port + 1 if occupied_by_other_version else port
+    for candidate in range(first_candidate, port + 21):
+        try:
+            server = ThreadingHTTPServer(("0.0.0.0", candidate), HabitHandler)
+            selected_port = candidate
+            break
+        except OSError:
+            continue
+    if server is None:
+        if open_browser:
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        return
+    url = f"http://127.0.0.1:{selected_port}"
+    server.last_seen = time.monotonic()
+
+    def stop_when_unused() -> None:
+        while True:
+            time.sleep(5)
+            if time.monotonic() - server.last_seen > 45:
+                server.shutdown()
+                return
+
+    threading.Thread(target=stop_when_unused, daemon=True).start()
+    if open_browser:
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    print(f"{APP_NAME} is running at {url}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the Habitline habit tracker.")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--data-dir", type=Path)
+    arguments = parser.parse_args()
+    run_server(arguments.port, not arguments.no_browser, arguments.data_dir)
+
+
+if __name__ == "__main__":
+    main()
